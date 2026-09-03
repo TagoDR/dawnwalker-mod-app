@@ -1,0 +1,73 @@
+[data-glow] {
+  position: relative;
+  isolation: isolate;
+  transition: color 200ms ease, transform 200ms ease;
+}
+
+[data-glow]:hover {
+  color: #fff7d6;
+  transform: translateY(-1px);
+}
+
+[data-glow]::after,
+[data-glow]::before {
+  position: absolute;
+  z-index: -1;
+  pointer-events: none;
+  content: "";
+  opacity: 0;
+}
+
+[data-glow]::after {
+  inset: -6px;
+  border-radius: 12px;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.7) 0%,
+    rgba(255, 240, 180, 0.4) 40%,
+    rgba(255, 200, 120, 0) 100%
+  );
+  filter: blur(12px);
+  mix-blend-mode: screen;
+}
+
+[data-glow]::before {
+  inset: -4px;
+  border-radius: 10px;
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0.4),
+    rgba(255, 240, 180, 0)
+  );
+  filter: blur(8px);
+  mix-blend-mode: screen;
+}
+
+[data-glow]:hover::after {
+  animation: glow-halo 400ms ease-out forwards;
+}
+
+[data-glow]:hover::before {
+  animation: rune-shimmer 600ms ease-out forwards;
+}
+
+@keyframes glow-halo {
+  0% { opacity: 0; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.05); }
+  100% { opacity: 0.6; transform: scale(1); }
+}
+
+@keyframes rune-shimmer {
+  0% { opacity: 0; transform: rotate(0deg) scale(0.9); }
+  40% { opacity: 0.8; transform: rotate(45deg) scale(1.05); }
+  100% { opacity: 0.4; transform: rotate(90deg) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-glow]:hover,
+  [data-glow]:hover::after,
+  [data-glow]:hover::before {
+    animation: none;
+    transform: none;
+  }
+}

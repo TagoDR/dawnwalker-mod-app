@@ -1,0 +1,84 @@
+.flare-container {
+  position: absolute;
+  inset: 0;
+  z-index: 500;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.9);
+  --effect-intensity: 1;
+}
+
+.flare-container.flare-active {
+  animation: flare-burst 700ms ease-out forwards;
+}
+
+.flare-core,
+.flare-ring,
+.flare-rays {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
+.flare-container.flare-active .flare-core {
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.95) 0%,
+    rgba(255, 240, 180, 0.7) 40%,
+    rgba(255, 200, 120, 0) 100%
+  );
+  filter: blur(30px);
+  mix-blend-mode: screen;
+  animation: flare-core-flash 700ms ease-out forwards;
+}
+
+.flare-container.flare-active .flare-ring {
+  border: 3px solid rgba(255, 240, 200, 0.8);
+  border-radius: 50%;
+  mix-blend-mode: screen;
+  animation: flare-ring-expand 700ms ease-out forwards;
+}
+
+.flare-container.flare-active .flare-rays {
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0.8),
+    rgba(255, 240, 180, 0)
+  );
+  filter: blur(20px);
+  mix-blend-mode: screen;
+  animation: flare-rays-spin 700ms ease-out forwards;
+}
+
+@keyframes flare-burst {
+  0% { opacity: 0; transform: scale(0.9); }
+  20% { opacity: var(--effect-intensity); transform: scale(1.1); }
+  100% { opacity: 0; transform: scale(1); }
+}
+
+@keyframes flare-core-flash {
+  0% { opacity: 0; transform: scale(0.5); }
+  40% { opacity: 1; transform: scale(1.2); }
+  100% { opacity: 0; transform: scale(1.4); }
+}
+
+@keyframes flare-ring-expand {
+  0% { opacity: 0; transform: scale(0.4); }
+  40% { opacity: 1; transform: scale(1.1); }
+  100% { opacity: 0; transform: scale(1.5); }
+}
+
+@keyframes flare-rays-spin {
+  0% { opacity: 0; transform: rotate(0deg) scale(0.6); }
+  40% { opacity: 1; transform: rotate(45deg) scale(1.1); }
+  100% { opacity: 0; transform: rotate(90deg) scale(1.4); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flare-container.flare-active,
+  .flare-container.flare-active .flare-core,
+  .flare-container.flare-active .flare-ring,
+  .flare-container.flare-active .flare-rays {
+    animation: none;
+  }
+}

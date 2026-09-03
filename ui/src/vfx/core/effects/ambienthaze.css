@@ -1,0 +1,54 @@
+.ambienthaze-container {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.haze-layer {
+  position: absolute;
+  inset: -20%;
+  background: radial-gradient(
+    circle at 50% 60%,
+    rgba(255, 255, 255, 0.12) 0%,
+    rgba(255, 240, 200, 0.08) 30%,
+    rgba(255, 220, 160, 0.04) 60%,
+    rgba(255, 200, 140, 0) 100%
+  );
+  filter: blur(40px);
+  mix-blend-mode: screen;
+  opacity: 0.35;
+  animation: haze-drift 22s ease-in-out infinite;
+}
+
+.haze-1 {
+  animation-delay: -4s;
+  animation-duration: 26s;
+}
+
+.haze-2 {
+  animation-delay: -10s;
+  animation-duration: 22s;
+}
+
+.haze-3 {
+  animation-delay: -16s;
+  animation-duration: 30s;
+}
+
+@keyframes haze-drift {
+  0%, 100% {
+    transform: translate3d(-4%, -2%, 0);
+  }
+
+  50% {
+    transform: translate3d(4%, 3%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .haze-layer {
+    animation: none;
+  }
+}

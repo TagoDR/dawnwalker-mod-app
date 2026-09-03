@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "comfy-mcp": {
+      "type": "stdio",
+      "command": "C:\\Users\\jerea\\AppData\\Roaming\\Python\\Python314\\Scripts\\comfy-mcp.exe"
+    }
+  }
+}

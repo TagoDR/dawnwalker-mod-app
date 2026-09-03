@@ -1,0 +1,68 @@
+@import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap");
+
+/* Neutral defaults — fully overridden by ThemeProvider */
+:root {
+  --sans: Inter, "Segoe UI", sans-serif;
+  --heading: Cinzel, Georgia, serif;
+  --mono: "Cascadia Code", Consolas, monospace;
+
+  /* Theme variables (injected dynamically) */
+  --background: #1a1a1a;
+  --surface: #2a2a2a;
+  --text: #eaeaea;
+  --accent: #444;
+  --crimson: #b00000;
+  --gold: #c9a34e;
+  --divider: #444;
+  --glow: rgba(255, 255, 255, 0.2);
+
+  font-family: var(--sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+
+  color: var(--text);
+  background: var(--background);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--divider);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 3px;
+}
+
+/* Theme-reactive scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface);
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid var(--surface);
+  border-radius: 9px;
+  background: var(--accent);
+}
