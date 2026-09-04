@@ -1,4 +1,4 @@
-export default function DWSlider({ label, value, onChange, min = 0, max = 100 }) {
+export default function DWSlider({ label, value, onChange, min = 0, max = 100, step = 1 }) {
   return (
     <div className="field">
       <label className="field-label">
@@ -10,6 +10,7 @@ export default function DWSlider({ label, value, onChange, min = 0, max = 100 })
         type="range"
         min={min}
         max={max}
+        step={step}
         value={value}
         onChange={(event) => onChange(Number(event.target.value))}
       />

@@ -540,6 +540,36 @@ function applyInfiniteStamina(enabled) {
   return writeBridgeCommand({ infiniteStamina: enabled ? 1 : 0 });
 }
 
+function applySpeedMultiplier(mult) {
+  const numericMult = Math.max(0.1, Math.min(5, Number(mult)));
+  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid speed multiplier" };
+  return writeBridgeCommand({ speedMultiplier: numericMult });
+}
+
+function applyJumpMultiplier(mult) {
+  const numericMult = Math.max(0.1, Math.min(5, Number(mult)));
+  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid jump multiplier" };
+  return writeBridgeCommand({ jumpMultiplier: numericMult });
+}
+
+function applyFovMultiplier(mult) {
+  const numericMult = Math.max(0.1, Math.min(5, Number(mult)));
+  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid FOV multiplier" };
+  return writeBridgeCommand({ fovMultiplier: numericMult });
+}
+
+function applyGameSpeed(speed) {
+  const numericSpeed = Math.max(0.1, Math.min(4, Number(speed)));
+  if (!Number.isFinite(numericSpeed)) return { ok: false, error: "Invalid game speed" };
+  return writeBridgeCommand({ gameSpeed: numericSpeed });
+}
+
+function applyDamageMultiplier(mult) {
+  const numericMult = Math.max(0.1, Math.min(50, Number(mult)));
+  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid damage multiplier" };
+  return writeBridgeCommand({ damageMultiplier: numericMult });
+}
+
 function readBridgeStatus() {
   const paths = getBridgePaths();
   if (!paths) return { ok: false, error: "Game install was not found", deployed: false, gameRunning: isDawnwalkerRunning() };
@@ -607,6 +637,11 @@ app.whenReady().then(() => {
   ipcMain.handle("bridge:apply-level-cap", (_event, cap) => applyLevelCap(cap));
   ipcMain.handle("bridge:apply-infinite-health", (_event, enabled) => applyInfiniteHealth(enabled));
   ipcMain.handle("bridge:apply-infinite-stamina", (_event, enabled) => applyInfiniteStamina(enabled));
+  ipcMain.handle("bridge:apply-speed", (_event, mult) => applySpeedMultiplier(mult));
+  ipcMain.handle("bridge:apply-jump", (_event, mult) => applyJumpMultiplier(mult));
+  ipcMain.handle("bridge:apply-fov", (_event, mult) => applyFovMultiplier(mult));
+  ipcMain.handle("bridge:apply-game-speed", (_event, speed) => applyGameSpeed(speed));
+  ipcMain.handle("bridge:apply-damage-multiplier", (_event, mult) => applyDamageMultiplier(mult));
   createWindow();
 
   app.on("activate", () => {

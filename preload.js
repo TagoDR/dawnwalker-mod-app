@@ -10,4 +10,9 @@ contextBridge.exposeInMainWorld("dawnwalker", {
 	applyLevelCap: (cap) => ipcRenderer.invoke("bridge:apply-level-cap", cap),
 	applyInfiniteHealth: (enabled) => ipcRenderer.invoke("bridge:apply-infinite-health", enabled),
 	applyInfiniteStamina: (enabled) => ipcRenderer.invoke("bridge:apply-infinite-stamina", enabled),
+	applySpeedMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-speed", mult),
+	applyJumpMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-jump", mult),
+	applyFovMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-fov", mult),
+	applyGameSpeed: (speed) => ipcRenderer.invoke("bridge:apply-game-speed", speed),
+	applyDamageMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-damage-multiplier", mult),
 });

@@ -21,6 +21,11 @@ function LiveGameBridge() {
   const [levelCapInput, setLevelCapInput] = useState(99);
   const [infiniteHealth, setInfiniteHealth] = useState(false);
   const [infiniteStamina, setInfiniteStamina] = useState(false);
+  const [speedMultiplier, setSpeedMultiplier] = useState(1);
+  const [jumpMultiplier, setJumpMultiplier] = useState(1);
+  const [fovMultiplier, setFovMultiplier] = useState(1);
+  const [gameSpeed, setGameSpeed] = useState(1);
+  const [damageMultiplier, setDamageMultiplier] = useState(1);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
 
@@ -85,6 +90,36 @@ function LiveGameBridge() {
     setMessage(result.ok ? null : result.error);
   };
 
+  const handleSpeedMultiplier = async (value) => {
+    setSpeedMultiplier(value);
+    const result = await bridge.applySpeedMultiplier(value);
+    setMessage(result.ok ? null : result.error);
+  };
+
+  const handleJumpMultiplier = async (value) => {
+    setJumpMultiplier(value);
+    const result = await bridge.applyJumpMultiplier(value);
+    setMessage(result.ok ? null : result.error);
+  };
+
+  const handleFovMultiplier = async (value) => {
+    setFovMultiplier(value);
+    const result = await bridge.applyFovMultiplier(value);
+    setMessage(result.ok ? null : result.error);
+  };
+
+  const handleGameSpeed = async (value) => {
+    setGameSpeed(value);
+    const result = await bridge.applyGameSpeed(value);
+    setMessage(result.ok ? null : result.error);
+  };
+
+  const handleDamageMultiplier = async (value) => {
+    setDamageMultiplier(value);
+    const result = await bridge.applyDamageMultiplier(value);
+    setMessage(result.ok ? null : result.error);
+  };
+
   return (
     <RuneSection title="Live Game Bridge (UE4SS)">
       <p style={{ opacity: 0.78, marginBottom: 12 }}>
@@ -105,6 +140,8 @@ function LiveGameBridge() {
           <p>Level cap: {status?.levelCap ?? "unknown"}</p>
           <p>Health: {status?.healthPercent ?? "unknown"}</p>
           <p>Stamina: {status?.staminaPercent ?? "unknown"}</p>
+          <p>Walk speed: {status?.movementFound ? "tracked" : "unknown"}</p>
+          <p>Damage multiplier applied: {status?.damageMultiplierApplied === "1" ? "Yes" : "No"}</p>
         </>
       )}
       {message && <p style={{ color: theme.colors.gold }}>{message}</p>}
@@ -123,6 +160,46 @@ function LiveGameBridge() {
           </div>
           <DWToggle label="Infinite Health" value={infiniteHealth} onChange={handleToggleInfiniteHealth} />
           <DWToggle label="Infinite Stamina" value={infiniteStamina} onChange={handleToggleInfiniteStamina} />
+          <DWSlider
+            label="Player Speed Multiplier"
+            value={speedMultiplier}
+            onChange={handleSpeedMultiplier}
+            min={0.1}
+            max={5}
+            step={0.1}
+          />
+          <DWSlider
+            label="Jump Height Multiplier"
+            value={jumpMultiplier}
+            onChange={handleJumpMultiplier}
+            min={0.1}
+            max={5}
+            step={0.1}
+          />
+          <DWSlider
+            label="Field of View Multiplier"
+            value={fovMultiplier}
+            onChange={handleFovMultiplier}
+            min={0.1}
+            max={5}
+            step={0.1}
+          />
+          <DWSlider
+            label="Game Speed"
+            value={gameSpeed}
+            onChange={handleGameSpeed}
+            min={0.1}
+            max={4}
+            step={0.1}
+          />
+          <DWSlider
+            label="Damage Multiplier"
+            value={damageMultiplier}
+            onChange={handleDamageMultiplier}
+            min={0.1}
+            max={50}
+            step={0.1}
+          />
         </div>
       )}
     </RuneSection>
