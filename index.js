@@ -607,9 +607,18 @@ function applyGameSpeed(speed) {
 }
 
 function applyDamageMultiplier(mult) {
-  const numericMult = Math.max(0.1, Math.min(50, Number(mult)));
+  const numericMult = Math.max(0.1, Math.min(10, Number(mult)));
   if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid damage multiplier" };
   return writeBridgeCommand({ damageMultiplier: numericMult });
+}
+
+let nukeRequestCounter = 0;
+
+function applyNukeTarget(amount) {
+  const numericAmount = Math.max(1, Math.min(999999, Number(amount)));
+  if (!Number.isFinite(numericAmount)) return { ok: false, error: "Invalid damage amount" };
+  nukeRequestCounter += 1;
+  return writeBridgeCommand({ nukeRequestId: nukeRequestCounter, nukeDamage: numericAmount });
 }
 
 function readBridgeStatus() {
@@ -627,6 +636,120 @@ function readBridgeStatus() {
     status[key] = rest.join("=");
   }
   return { ok: status.ok === "1", deployed, gameRunning, ...status };
+}
+
+// DawnwalkerNativeFix: a native UE4SS C++ mod (native-mods/DawnwalkerNativeFix) that replaces the
+// Lua GiveBestGear path, which was disabled after it was found to always grant the wrong item (see
+// runtime-mods/DawnwalkerModBridge/Scripts/main.lua's 2026-09-04 diagnostic comment). Lua's UFunction
+// marshalling turns the FItemHandle GetItemHandle returns into an empty table (it has zero reflected
+// properties), so the native mod instead calls GetItemHandle/TryAddItem via raw ProcessEvent and
+// memcpy's the struct's raw bytes directly - see native-mods/DawnwalkerNativeFix/dllmain.cpp.
+// Uses its own command.txt/status.txt under Mods/DawnwalkerNativeFix, separate from the bridge mod.
+const nativeFixDllSource = path.join(__dirname, "native-mods", "dist", "DawnwalkerNativeFix.dll");
+
+function getNativeFixPaths() {
+  const gameRoot = resolveCachedGameRoot();
+  if (!gameRoot) return null;
+  const modsDir = path.join(gameRoot, "Binaries", "Win64", "Mods");
+  const modDir = path.join(modsDir, "DawnwalkerNativeFix");
+  return {
+    gameRoot,
+    modsDir,
+    modDir,
+    dllFile: path.join(modDir, "dlls", "main.dll"),
+    commandFile: path.join(modDir, "command.txt"),
+    statusFile: path.join(modDir, "status.txt"),
+  };
+}
+
+function ensureNativeFixEnabledInModsTxt(modsDir) {
+  const modsTxtPath = path.join(modsDir, "mods.txt");
+  const content = readText(modsTxtPath) || "";
+  if (/^\s*DawnwalkerNativeFix\s*:/m.test(content)) {
+    if (/^\s*DawnwalkerNativeFix\s*:\s*0/m.test(content)) {
+      fs.writeFileSync(modsTxtPath, content.replace(/^\s*DawnwalkerNativeFix\s*:\s*0/m, "DawnwalkerNativeFix : 1"));
+    }
+    return;
+  }
+  const separator = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
+  fs.writeFileSync(modsTxtPath, `${content}${separator}DawnwalkerNativeFix : 1\n`);
+}
+
+function deployNativeFix() {
+  const paths = getNativeFixPaths();
+  if (!paths) return { ok: false, error: "Game install was not found" };
+  if (!fs.existsSync(paths.modsDir)) {
+    return { ok: false, error: "UE4SS Mods directory was not found; install UE4SS before deploying the native fix" };
+  }
+  if (!fs.existsSync(nativeFixDllSource)) {
+    return { ok: false, error: "DawnwalkerNativeFix.dll was not found in the app bundle" };
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(paths.dllFile), { recursive: true });
+    fs.copyFileSync(nativeFixDllSource, paths.dllFile);
+    ensureNativeFixEnabledInModsTxt(paths.modsDir);
+    return { ok: true, modDir: paths.modDir };
+  } catch (error) {
+    return { ok: false, error: error.message || "Failed to deploy the native fix mod" };
+  }
+}
+
+function isNativeFixDeployed() {
+  const paths = getNativeFixPaths();
+  if (!paths) return false;
+  return fs.existsSync(paths.dllFile);
+}
+
+let nativeFixRequestCounter = 0;
+
+function applyGiveGearNative(gearId) {
+  const paths = getNativeFixPaths();
+  if (!paths) return { ok: false, error: "Game install was not found" };
+  if (!isNativeFixDeployed()) return { ok: false, error: "Native fix mod is not deployed yet" };
+  if (!gearId || typeof gearId !== "string") return { ok: false, error: "Invalid gear id" };
+
+  nativeFixRequestCounter += 1;
+  try {
+    fs.mkdirSync(paths.modDir, { recursive: true });
+    fs.writeFileSync(paths.commandFile, `requestId=${nativeFixRequestCounter}\ngiveGearId=${gearId}\n`);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || "Failed to write native fix command" };
+  }
+}
+
+function applyRemoveGearNative(gearId) {
+  const paths = getNativeFixPaths();
+  if (!paths) return { ok: false, error: "Game install was not found" };
+  if (!isNativeFixDeployed()) return { ok: false, error: "Native fix mod is not deployed yet" };
+  if (!gearId || typeof gearId !== "string") return { ok: false, error: "Invalid gear id" };
+
+  nativeFixRequestCounter += 1;
+  try {
+    fs.mkdirSync(paths.modDir, { recursive: true });
+    fs.writeFileSync(paths.commandFile, `requestId=${nativeFixRequestCounter}\nremoveGearId=${gearId}\n`);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || "Failed to write native fix command" };
+  }
+}
+
+function readNativeFixStatus() {
+  const paths = getNativeFixPaths();
+  if (!paths) return { ok: false, error: "Game install was not found", deployed: false, gameRunning: isDawnwalkerRunning() };
+  const deployed = isNativeFixDeployed();
+  const content = readText(paths.statusFile);
+  const gameRunning = isDawnwalkerRunning();
+  if (!content) return { ok: false, deployed, gameRunning, error: gameRunning ? "No status yet; is the game running with the native fix mod enabled?" : "Game is not running" };
+
+  const status = {};
+  for (const line of content.split(/\r?\n/)) {
+    const [key, ...rest] = line.split("=");
+    if (!key) continue;
+    status[key] = rest.join("=");
+  }
+  return { ok: true, deployed, gameRunning, ...status };
 }
 
 function createWindow() {
@@ -679,6 +802,10 @@ app.whenReady().then(() => {
   ipcMain.handle("bridge:apply-level", (_event, level) => applyPlayerLevel(level));
   ipcMain.handle("bridge:apply-level-cap", (_event, cap) => applyLevelCap(cap));
   ipcMain.handle("bridge:give-best-gear", () => applyGiveBestGear());
+  ipcMain.handle("nativefix:deploy", () => deployNativeFix());
+  ipcMain.handle("nativefix:status", () => readNativeFixStatus());
+  ipcMain.handle("nativefix:give-gear", (_event, gearId) => applyGiveGearNative(gearId));
+  ipcMain.handle("nativefix:remove-gear", (_event, gearId) => applyRemoveGearNative(gearId));
   ipcMain.handle("bridge:apply-infinite-health", (_event, enabled) => applyInfiniteHealth(enabled));
   ipcMain.handle("bridge:apply-infinite-stamina", (_event, enabled) => applyInfiniteStamina(enabled));
   ipcMain.handle("bridge:apply-speed", (_event, mult) => applySpeedMultiplier(mult));
@@ -686,6 +813,7 @@ app.whenReady().then(() => {
   ipcMain.handle("bridge:apply-fov", (_event, mult) => applyFovMultiplier(mult));
   ipcMain.handle("bridge:apply-game-speed", (_event, speed) => applyGameSpeed(speed));
   ipcMain.handle("bridge:apply-damage-multiplier", (_event, mult) => applyDamageMultiplier(mult));
+  ipcMain.handle("bridge:nuke-target", (_event, amount) => applyNukeTarget(amount));
   createWindow();
 
   app.on("activate", () => {

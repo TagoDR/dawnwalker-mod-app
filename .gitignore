@@ -3,3 +3,5 @@ release/
 ui/dist/
 ui/node_modules/
 *.log
+native-mods/RE-UE4SS/
+native-mods/build/

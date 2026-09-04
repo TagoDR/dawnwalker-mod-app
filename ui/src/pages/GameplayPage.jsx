@@ -105,14 +105,6 @@ function LiveGameBridge() {
     setBusy(false);
   };
 
-  const handleGiveBestGear = async () => {
-    setBusy(true);
-    setMessage(null);
-    const result = await bridge.giveBestGear();
-    setMessage(result.ok ? "Best gear request sent to the game." : result.error);
-    setBusy(false);
-  };
-
   const handleToggleInfiniteHealth = async (value) => {
     setInfiniteHealth(value);
     const result = await bridge.applyInfiniteHealth(value);
@@ -170,7 +162,6 @@ function LiveGameBridge() {
           <p>Health: {status?.healthPercent ?? "unknown"}</p>
           <p>Stamina: {status?.staminaPercent ?? "unknown"}</p>
           <p>Walk speed: {status?.movementFound ? "tracked" : "unknown"}</p>
-          <p>Give best gear result: {status?.giveBestGearResult ?? "not yet requested"}</p>
         </>
       )}
       {message && <p style={{ color: theme.colors.gold }}>{message}</p>}
@@ -221,20 +212,6 @@ function LiveGameBridge() {
             max={4}
             step={0.1}
           />
-          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-            <DWButton
-              label="Give Best Gear (disabled)"
-              onClick={handleGiveBestGear}
-              disabled
-              data-clickpulse
-              data-glow
-            />
-            <span style={{ opacity: 0.78, fontSize: "0.9em" }}>
-              Temporarily disabled: this granted the wrong item (a "Bee Smoker" quest item) instead
-              of the intended gear, flooding inventories. Do not re-enable until the underlying
-              GetItemHandle bug is fixed.
-            </span>
-          </div>
         </div>
       )}
     </RuneSection>

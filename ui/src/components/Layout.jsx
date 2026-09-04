@@ -5,6 +5,7 @@ import ThemeToggle from "./ThemeToggle";
 const pages = [
   "Install & Capabilities",
   "Gameplay Profile",
+  "Gear",
   "Skills & Progression",
   "Day / Night & Timer",
   "Combat & Experience",

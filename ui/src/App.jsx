@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import Layout from "./components/Layout";
 
 import GameplayPage from "./pages/GameplayPage";
+import GearPage from "./pages/GearPage";
 import SkillsPage from "./pages/SkillsPage";
 import DayNightPage from "./pages/DayNightPage";
 import CombatPage from "./pages/CombatPage";
@@ -42,6 +43,7 @@ export default function App() {
           <Layout page={page} setPage={setPage}>
             {page === "Install & Capabilities" && <GameStatusPage />}
             {page === "Gameplay Profile" && <GameplayPage />}
+            {page === "Gear" && <GearPage />}
             {page === "Skills & Progression" && <SkillsPage />}
             {page === "Day / Night & Timer" && <DayNightPage />}
             {page === "Combat & Experience" && <CombatPage />}

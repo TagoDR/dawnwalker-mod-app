@@ -16,5 +16,10 @@ contextBridge.exposeInMainWorld("dawnwalker", {
 	applyFovMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-fov", mult),
 	applyGameSpeed: (speed) => ipcRenderer.invoke("bridge:apply-game-speed", speed),
 	applyDamageMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-damage-multiplier", mult),
+	nukeTarget: (amount) => ipcRenderer.invoke("bridge:nuke-target", amount),
 	giveBestGear: () => ipcRenderer.invoke("bridge:give-best-gear"),
+	deployNativeFix: () => ipcRenderer.invoke("nativefix:deploy"),
+	nativeFixStatus: () => ipcRenderer.invoke("nativefix:status"),
+	giveGearNative: (gearId) => ipcRenderer.invoke("nativefix:give-gear", gearId),
+	removeGearNative: (gearId) => ipcRenderer.invoke("nativefix:remove-gear", gearId),
 });

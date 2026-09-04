@@ -23,6 +23,8 @@ local COMMAND_PATH = "Mods/DawnwalkerModBridge/command.txt"
 local STATUS_PATH = "Mods/DawnwalkerModBridge/status.txt"
 
 local LastRequestId = nil
+local LastNukeRequestId = nil
+local LastNukeTargetResult = nil
 local PendingGiveBestGear = false
 local LastGiveBestGearResult = nil
 local WasCombatFound = false
@@ -355,6 +357,13 @@ local MovementSettleTicksRemaining = 0
 -- address-based settle window had already expired and gave zero protection. This counter
 -- gates on that transition directly, whatever caused it.
 local CombatComponentSettleTicksRemaining = 0
+-- The damage-multiplier write touches 13 separate GAS attributes in one go (heavier than the
+-- simple Lock/SetPercent calls CombatComponentSettleTicksRemaining already protects) - crashes
+-- kept recurring at the exact same point (right after this write's first-ever invocation) even
+-- after lowering the multiplier and hard-capping the written values, so give this specific write
+-- its own longer, independent settle window rather than assuming the general combat-component
+-- settle window (3 ticks) is long enough for it too.
+local DamageMultiplierSettleTicksRemaining = 0
 local function RefreshPawnSettleState()
     local playerOk, player = pcall(UEHelpers.GetPlayer)
     if not playerOk or not player or not SafeIsValid(player) then return nil end
@@ -443,18 +452,20 @@ local function ApplyDamageMultiplier(player, multiplier)
             -- Diagnostics (2026-09-03) showed these read 0.0 by default, not 1.0 - the game
             -- treats them as an additive "extra damage" bonus on top of the weapon's own damage,
             -- not a scalar multiplier. Convert our 1x-is-neutral slider value into that convention:
-            -- multiplier=1 -> +0 (no change), multiplier=50 -> +49 (base damage plus 4900%).
-            local bonus = base + (multiplier - 1)
+            -- multiplier=1 -> +0 (no change), multiplier=10 -> +9 (base damage plus 900%).
+            -- Hard-capped at 200 regardless of multiplier (defense-in-depth, see repo memory) -
+            -- extreme absolute values here are the leading crash suspect, not the multiplier
+            -- itself.
+            local bonus = math.min(base + (multiplier - 1), 200)
             writeOk = pcall(function()
                 attrSet[attrName].CurrentValue = bonus
                 attrSet[attrName].BaseValue = bonus
             end)
         end
         if diagLog then
-            local currentOk, currentVal = pcall(function() return attrSet[attrName].CurrentValue end)
             print(string.format(
-                "[DawnwalkerModBridge] DamageMultiplier diag: %s base=%s multiplier=%s writeOk=%s currentAfterWrite=%s",
-                attrName, tostring(base), tostring(multiplier), tostring(writeOk), tostring(currentOk and currentVal or "unknown")))
+                "[DawnwalkerModBridge] DamageMultiplier diag: %s base=%s multiplier=%s writeOk=%s",
+                attrName, tostring(base), tostring(multiplier), tostring(writeOk)))
         end
     end
 
@@ -470,13 +481,14 @@ local function ApplyDamageMultiplier(player, multiplier)
         if base then
             -- Real per-hit damage magnitude, so a genuine scalar multiply is the right convention
             -- here (unlike the additive bonus used for the 0-based XDamageMultiplier attrs above).
-            writeOk = pcall(function() attrSet[attrName].CurrentValue = base * multiplier end)
+            -- Hard-capped at 20000 regardless of multiplier (defense-in-depth, see repo memory) -
+            -- extreme absolute values here are the leading crash suspect, not the multiplier itself.
+            writeOk = pcall(function() attrSet[attrName].CurrentValue = math.min(base * multiplier, 20000) end)
         end
         if diagLog then
-            local currentOk, currentVal = pcall(function() return attrSet[attrName].CurrentValue end)
             print(string.format(
-                "[DawnwalkerModBridge] DamageValue diag: %s base=%s multiplier=%s writeOk=%s currentAfterWrite=%s",
-                attrName, tostring(base), tostring(multiplier), tostring(writeOk), tostring(currentOk and currentVal or "unknown")))
+                "[DawnwalkerModBridge] DamageValue diag: %s base=%s multiplier=%s writeOk=%s",
+                attrName, tostring(base), tostring(multiplier), tostring(writeOk)))
         end
     end
 end
@@ -707,6 +719,7 @@ local function ApplyCommand()
                 print("[DawnwalkerModBridge] Combat component found for player")
                 WasCombatFound = true
                 CombatComponentSettleTicksRemaining = 3
+                DamageMultiplierSettleTicksRemaining = 10
             end
             status.combatFound = 1
             local componentSettling = CombatComponentSettleTicksRemaining > 0
@@ -717,6 +730,9 @@ local function ApplyCommand()
                 -- cutscene), the exact same hazard class as a freshly-spawned pawn.
                 CombatComponentSettleTicksRemaining = CombatComponentSettleTicksRemaining - 1
             else
+                if DamageMultiplierSettleTicksRemaining > 0 then
+                    DamageMultiplierSettleTicksRemaining = DamageMultiplierSettleTicksRemaining - 1
+                end
             -- SetHealthPercent(1.0) alone only corrects health once per poll (1s); combat damage
             -- lands in real time and can still kill the player in the gap between polls. LockHealth
             -- freezes the stat against damage entirely, which is what actually stops death - the
@@ -755,14 +771,18 @@ local function ApplyCommand()
             end
             if command.damageMultiplier then
                 local dmgMult = tonumber(command.damageMultiplier)
-                -- Wide range on purpose (up to a guaranteed one-shot-kill multiplier) - unlike
-                -- speed/jump this can't clip the player through geometry, so there's no physics
-                -- reason to keep it tight.
-                if dmgMult and dmgMult >= 0.1 and dmgMult <= 50 then
+                -- Lowered from 50 to 10 (2026-09-04): every crash correlated with this feature in
+                -- the native-mod testing session had damageMultiplier=50 active, and the resulting
+                -- raw-written attribute values at 50x were extreme (e.g. 724 base * 50 = 36200,
+                -- vs a real per-hit magnitude in the hundreds) - a plausible trigger for whatever
+                -- downstream system (damage-number UI, overkill/gib logic, etc.) reads these
+                -- values next. 10x still gives a very noticeable damage boost with far less
+                -- extreme absolute numbers.
+                if dmgMult and dmgMult >= 0.1 and dmgMult <= 10 then
                     -- Unlike health/stamina, nothing fights this value back tick-to-tick - only
                     -- touch the raw struct when the pawn is new or the requested value actually
                     -- changed, instead of every 1s poll, to cut exposure to this write's crash risk.
-                    if dmgMult ~= LastAppliedDamageMultiplier then
+                    if dmgMult ~= LastAppliedDamageMultiplier and DamageMultiplierSettleTicksRemaining <= 0 then
                         -- Same raw-struct-write hazard as ForceDirectHealthAttribute: bypasses all
                         -- engine-side validity checks, so skip it once the game considers the
                         -- character dead (fail-open on error, same as the health path).
@@ -904,6 +924,27 @@ local function ApplyCommand()
             end
         end
         status.nativeGodModeApplied = WasNativeGodModeApplied and 1 or 0
+
+        -- The stat-based Damage Multiplier writes successfully and holds steady (confirmed via
+        -- ReadDamageMultiplierLiveValue/ReadWeaponDamageLiveValue) but has never been shown to
+        -- affect real combat damage in this game - the actual damage calculation appears to read
+        -- from somewhere else entirely (see repo memory's extensive "DAMAGE MULTIPLIER" saga).
+        -- DamageTarget is the engine's own stock CheatManager function (bound to the "damage"
+        -- console command in any UE game) - it traces to whatever the player is currently aiming
+        -- at and applies real damage through the actual damage pipeline, guaranteed to work since
+        -- it's not a custom Dogwood attribute, it's stock Unreal Engine cheat functionality.
+        local nukeRequestId = command.nukeRequestId
+        if nukeRequestId and nukeRequestId ~= LastNukeRequestId then
+            LastNukeRequestId = nukeRequestId
+            local amount = tonumber(command.nukeDamage)
+            if amount and amount > 0 and amount <= 999999 then
+                local dmgOk, dmgErr = pcall(function() cheatManager:DamageTarget(amount) end)
+                LastNukeTargetResult = dmgOk and "ok" or ("failed: " .. tostring(dmgErr))
+            else
+                LastNukeTargetResult = "failed: out_of_range"
+            end
+        end
+        status.nukeTargetResult = LastNukeTargetResult
     else
         status.cheatManagerFound = 0
     end

@@ -79,12 +79,49 @@ function DamageMultiplierControl() {
         value={damageMultiplier}
         onChange={handleDamageMultiplier}
         min={0.1}
-        max={50}
+        max={10}
         step={0.1}
       />
       <p style={{ opacity: 0.78 }}>Applied to the running game: {applied ? "Yes" : "No"}</p>
+      <p style={{ opacity: 0.78, fontSize: "0.85em" }}>
+        Note: this writes real game attributes and holds steady, but has not been confirmed to
+        actually change combat damage - the game's real damage formula may read a different value
+        entirely. Use "Nuke Target" below for a guaranteed damage effect instead.
+      </p>
       {message && <p style={{ color: theme.colors.gold }}>{message}</p>}
     </>
+  );
+}
+
+// Uses the engine's own stock CheatManager:DamageTarget(Amount) - deals real damage to whatever
+// the player is currently aiming at, through the actual damage pipeline (not a custom Dogwood
+// attribute like the multiplier above, so it's guaranteed to work).
+function NukeTargetControl() {
+  const { theme } = useTheme();
+  const bridge = typeof window !== "undefined" ? window.dawnwalker : null;
+  const [amount, setAmount] = useState(5000);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  if (!bridge) return null;
+
+  const handleNuke = async () => {
+    setBusy(true);
+    setMessage(null);
+    const result = await bridge.nukeTarget(amount);
+    setMessage(result.ok ? "Damage request sent to the game." : result.error);
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <DWSlider label="Nuke Target - Damage Amount" value={amount} onChange={setAmount} min={1} max={999999} step={1} />
+      <DWButton label="Nuke Target" onClick={handleNuke} disabled={busy} data-clickpulse data-glow />
+      <p style={{ opacity: 0.78, fontSize: "0.85em", marginTop: 6 }}>
+        Deals this much damage to whatever you're currently aiming at.
+      </p>
+      {message && <p style={{ color: theme.colors.gold }}>{message}</p>}
+    </div>
   );
 }
 
@@ -116,6 +153,7 @@ export default function CombatPage() {
       <RuneStagger index={0}>
         <RuneSection title="Player Combat Stats">
           <DamageMultiplierControl />
+          <NukeTargetControl />
 
           <DWSlider
             label="Critical Chance (%)"
