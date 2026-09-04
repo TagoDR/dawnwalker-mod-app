@@ -3,6 +3,7 @@ import { useTheme } from "../theme/useTheme";
 import { useGameData } from "../data/useGameData";
 import { useModding } from "../modding/useModding";
 
+import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import RuneStagger from "../components/ui/RuneStagger";
 import DWSlider from "../components/ui/DWSlider";
@@ -25,7 +26,6 @@ function LiveGameBridge() {
   const [jumpMultiplier, setJumpMultiplier] = useState(1);
   const [fovMultiplier, setFovMultiplier] = useState(1);
   const [gameSpeed, setGameSpeed] = useState(1);
-  const [damageMultiplier, setDamageMultiplier] = useState(1);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
 
@@ -45,6 +45,33 @@ function LiveGameBridge() {
     return () => {
       cancelled = true;
       clearInterval(interval);
+    };
+  }, [bridge]);
+
+  // Re-hydrate the sliders/toggles from the actual last-applied values: this page mounts fresh
+  // every time the user navigates back to it, so without this everything would appear reset to
+  // its default (1x/off) even though the game is still running with the real values applied.
+  useEffect(() => {
+    if (!bridge) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const state = await bridge.getBridgeCommandState();
+        if (cancelled || !state) return;
+        if (state.setLevel !== undefined) setLevelInput(Number(state.setLevel));
+        if (state.levelCap !== undefined) setLevelCapInput(Number(state.levelCap));
+        if (state.infiniteHealth !== undefined) setInfiniteHealth(state.infiniteHealth === "1" || state.infiniteHealth === 1);
+        if (state.infiniteStamina !== undefined) setInfiniteStamina(state.infiniteStamina === "1" || state.infiniteStamina === 1);
+        if (state.speedMultiplier !== undefined) setSpeedMultiplier(Number(state.speedMultiplier));
+        if (state.jumpMultiplier !== undefined) setJumpMultiplier(Number(state.jumpMultiplier));
+        if (state.fovMultiplier !== undefined) setFovMultiplier(Number(state.fovMultiplier));
+        if (state.gameSpeed !== undefined) setGameSpeed(Number(state.gameSpeed));
+      } catch {
+        // Non-fatal: controls just fall back to their hardcoded defaults.
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
   }, [bridge]);
 
@@ -75,6 +102,14 @@ function LiveGameBridge() {
     setMessage(null);
     const result = await bridge.applyLevelCap(levelCapInput);
     setMessage(result.ok ? "Level cap change sent to the game." : result.error);
+    setBusy(false);
+  };
+
+  const handleGiveBestGear = async () => {
+    setBusy(true);
+    setMessage(null);
+    const result = await bridge.giveBestGear();
+    setMessage(result.ok ? "Best gear request sent to the game." : result.error);
     setBusy(false);
   };
 
@@ -114,12 +149,6 @@ function LiveGameBridge() {
     setMessage(result.ok ? null : result.error);
   };
 
-  const handleDamageMultiplier = async (value) => {
-    setDamageMultiplier(value);
-    const result = await bridge.applyDamageMultiplier(value);
-    setMessage(result.ok ? null : result.error);
-  };
-
   return (
     <RuneSection title="Live Game Bridge (UE4SS)">
       <p style={{ opacity: 0.78, marginBottom: 12 }}>
@@ -141,7 +170,7 @@ function LiveGameBridge() {
           <p>Health: {status?.healthPercent ?? "unknown"}</p>
           <p>Stamina: {status?.staminaPercent ?? "unknown"}</p>
           <p>Walk speed: {status?.movementFound ? "tracked" : "unknown"}</p>
-          <p>Damage multiplier applied: {status?.damageMultiplierApplied === "1" ? "Yes" : "No"}</p>
+          <p>Give best gear result: {status?.giveBestGearResult ?? "not yet requested"}</p>
         </>
       )}
       {message && <p style={{ color: theme.colors.gold }}>{message}</p>}
@@ -192,14 +221,20 @@ function LiveGameBridge() {
             max={4}
             step={0.1}
           />
-          <DWSlider
-            label="Damage Multiplier"
-            value={damageMultiplier}
-            onChange={handleDamageMultiplier}
-            min={0.1}
-            max={50}
-            step={0.1}
-          />
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            <DWButton
+              label="Give Best Gear (disabled)"
+              onClick={handleGiveBestGear}
+              disabled
+              data-clickpulse
+              data-glow
+            />
+            <span style={{ opacity: 0.78, fontSize: "0.9em" }}>
+              Temporarily disabled: this granted the wrong item (a "Bee Smoker" quest item) instead
+              of the intended gear, flooding inventories. Do not re-enable until the underlying
+              GetItemHandle bug is fixed.
+            </span>
+          </div>
         </div>
       )}
     </RuneSection>
@@ -207,7 +242,6 @@ function LiveGameBridge() {
 }
 
 export default function GameplayPage() {
-  const { theme } = useTheme();
   const game = useGameData();
   const {
     gameplay,
@@ -222,11 +256,7 @@ export default function GameplayPage() {
 
   return (
     <div>
-      <h1 style={{ marginBottom: 10, color: theme.colors.gold, letterSpacing: "1px", textTransform: "uppercase" }}>
-        Gameplay Profile
-      </h1>
-
-      <div style={{ height: 2, background: theme.colors.divider, boxShadow: `0 0 10px ${theme.colors.glow}`, marginBottom: 20 }} />
+      <PageHeader title="Gameplay Profile" />
 
       <RuneStagger index={0}>
         <LiveGameBridge />

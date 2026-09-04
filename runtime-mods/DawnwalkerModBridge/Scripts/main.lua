@@ -23,53 +23,31 @@ local COMMAND_PATH = "Mods/DawnwalkerModBridge/command.txt"
 local STATUS_PATH = "Mods/DawnwalkerModBridge/status.txt"
 
 local LastRequestId = nil
+local PendingGiveBestGear = false
+local LastGiveBestGearResult = nil
 local WasCombatFound = false
 local ReportedLockHealthError = false
 local ReportedUnlockHealthError = false
 local ReportedLockStaminaError = false
 local ReportedUnlockStaminaError = false
--- LockHealth() alone (below) runs with no Lua error but does NOT actually stop combat
--- damage from landing - confirmed live: health still dropped with healthLocked=1. The
--- function that actually blocks damage is RebelAISubsystem:AddPlayerInvulnerability(Source).
+-- LockHealth() alone does not stop combat damage; the call that actually blocks it is
+-- RebelAISubsystem:AddPlayerInvulnerability(Source).
 local WasHealthInvulnerable = false
 local ReportedAddInvulnerabilityError = false
 local ReportedRemoveInvulnerabilityError = false
 local WasRebelAIFound = false
--- REAL FIX ATTEMPT #4: this game uses Unreal's GameplayAbilities plugin (GAS) for Health -
--- /Script/DogwoodStats.CharacterBaseAttributeSet has Health/MaxHealth as GAS attributes, and
--- the player's DawnwalkerCharacterBase:AbilitySystemComponent (class DawnwalkerAbilitySystemComponent)
--- is a real ASC. The game ships its own native invulnerability effect,
--- /Game/_Dawnwalker/Combat/Effects/Persistent/GE_Invulnerability.GE_Invulnerability_C, applyable
--- through the ASC's own BlueprintCallable functions (MakeEffectContext/MakeOutgoingSpec/
--- BP_ApplyGameplayEffectSpecToSelf) - this is how the GAME ITSELF would grant invulnerability
--- (e.g. during scripted sequences), not a guessed "toggle a flag" API.
+-- Infinite Health/Stamina is intentionally layered across several redundant mechanisms
+-- (AddPlayerInvulnerability, the GAS GE_Invulnerability effect below, native CheatManager:God(),
+-- and the raw GAS Health-attribute write in ForceDirectHealthAttribute further down). The real
+-- crash-on-respawn bug (see repo memory) turned out to be a settle-window race condition, not any
+-- one of these mechanisms - do not remove any of them without reason, they're kept as
+-- belt-and-suspenders, not because any single one was proven necessary or sufficient.
 local InvulnerabilityGEClass = nil
 local WasGodModeApplied = false
 local ReportedGodModeApplyError = false
 local ReportedGodModeRemoveError = false
--- REAL FIX ATTEMPT #4 CONFIRMED WRONG (2026-09-03): GE_Invulnerability applied cleanly via the
--- ASC (no error, godModeApplied=1 for 4+ minutes) but the player still died in 3 hits - this GE
--- likely only grants a cosmetic tag, it does not actually gate the damage pipeline.
--- REAL FIX ATTEMPT #5: toggle Unreal's own native CheatManager:God() cheat. This is the stock
--- engine "god mode" command (bound to the console "god" command) - unlike our own guessed toggle
--- APIs, this is the actual mechanism the engine's own cheat system uses to stop damage. It has no
--- getter, so track our own applied flag and only call it on rising/falling edge to avoid
--- re-toggling it back off on every tick.
 local WasNativeGodModeApplied = false
 local ReportedNativeGodModeError = false
--- REAL FIX ATTEMPT #5 CONFIRMED WRONG (2026-09-03): native God() toggled on with no error
--- (nativeGodModeApplied=1) yet the player still died in a fast 3-hit combo, health dropping in
--- large chunks with NO recovery between hits at all - even though the 100ms SetHealthPercent(1.0)
--- poll should have partially clawed it back if that call actually reached the value death checks
--- against. Working theory: SetHealthPercent/GetHealthPercentage on CombatComponentBase are a
--- derived/display value, while the real authoritative value is the GAS attribute
--- /Script/DogwoodStats.CharacterBaseAttributeSet:Health (a FGameplayAttributeData struct with its
--- own BaseValue/CurrentValue), fetched off the ASC via GetAttributeSet(AttributeSetClass).
--- REAL FIX ATTEMPT #6: on the fast 100ms loop, fetch the ASC's CharacterBaseAttributeSet instance
--- directly and force both Health.CurrentValue and Health.BaseValue to MaxHealth.CurrentValue,
--- bypassing SetHealthPercent entirely. Also records the raw values seen so status.txt can confirm
--- or refute the theory on the next live test regardless of whether the write itself works.
-local CharacterAttributeSetClass = nil
 local ReportedDirectHealthWriteError = false
 local DirectHealthDiagLogCount = 0
 local LastRawHealth = "unknown"
@@ -189,6 +167,156 @@ local function GetPlayerMovementComponent(player)
     return FindOwnedComponent("CharacterMovementComponent", player)
 end
 
+-- Same pattern again: the player's InventoryComponent (add/equip items lives here).
+local function GetPlayerInventoryComponent(player)
+    if not player or not SafeIsValid(player) then return nil end
+    return FindOwnedComponent("InventoryComponent", player)
+end
+
+-- Best-in-game picks (found via a one-time item-catalog scan, see repo memory for the full
+-- rarity/damage/toughness table): rarity=6 "Masterpiece/Unique" tier, highest damage/toughness
+-- within that tier. One weapon per type/style so the player has a real choice, but only the
+-- single highest-damage one auto-equips; all four armor slots equip
+-- since they don't conflict. Jewelry (rings/amulets) carries no comparable damage/toughness stat
+-- (likely special-effect items instead), so all rarity=6 ones are granted for the player to pick.
+local BEST_GEAR_WEAPONS = {
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordBlacksmithMasterpice2a.ITM_Weapon_SwordBlacksmithMasterpice2a", equip = false },
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordErkas1a.ITM_Weapon_SwordErkas1a", equip = false },
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordDawnwalker5a.ITM_Weapon_SwordDawnwalker5a", equip = true },
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_MaceMaster1a.ITM_Weapon_MaceMaster1a", equip = false },
+}
+local BEST_GEAR_ARMOR = {
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_ChestUniqueAncient1a.ITM_Clothing_ChestUniqueAncient1a", equip = true },
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_LegsUniqueAncient1a.ITM_Clothing_LegsUniqueAncient1a", equip = true },
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_HandsUniqueDawnwalker2a.ITM_Clothing_HandsUniqueDawnwalker2a", equip = true },
+    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_FeetUniqueDawnwalker2a.ITM_Clothing_FeetUniqueDawnwalker2a", equip = true },
+}
+local BEST_GEAR_JEWELRY = {
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing1.ITM_Clothing_NewUniqueRing1",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing2.ITM_Clothing_NewUniqueRing2",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing3.ITM_Clothing_NewUniqueRing3",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing4.ITM_Clothing_NewUniqueRing4",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing5.ITM_Clothing_NewUniqueRing5",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_VampiricRing.ITM_Clothing_VampiricRing",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_BakirRing.ITM_Clothing_BakirRing",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_DawnwalkersRing.ITM_Clothing_DawnwalkersRing",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_AstrologistsRing.ITM_Clothing_AstrologistsRing",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet1.ITM_Clothing_NewUniqueAmulet1",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet2.ITM_Clothing_NewUniqueAmulet2",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet3.ITM_Clothing_NewUniqueAmulet3",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet4.ITM_Clothing_NewUniqueAmulet4",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet5.ITM_Clothing_NewUniqueAmulet5",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_MatriarchsAmulet.ITM_Clothing_MatriarchsAmulet",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_VampiricAmulet.ITM_Clothing_VampiricAmulet",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_DawnwalkersAmulet.ITM_Clothing_DawnwalkersAmulet",
+    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_VichosCross.ITM_Clothing_VichosCross",
+}
+
+-- GetItemHandle is a BlueprintFunctionLibrary function - called on the class's CDO
+-- (the "Default__ClassName" convention), same as any other UFunction call in UE4SS Lua.
+local function GetInventoryFunctionLibrary()
+    local ok, lib = pcall(function()
+        return StaticFindObject("/Script/DogwoodInventory.Default__InventoryBlueprintFunctionLibrary")
+    end)
+    if ok and lib and SafeIsValid(lib) then return lib end
+    return nil
+end
+
+local function GiveBestGear(player, itemLevel)
+    if not player or not SafeIsValid(player) then return "no player" end
+    local inv = GetPlayerInventoryComponent(player)
+    if not inv or not SafeIsValid(inv) then return "no inventory component" end
+    local lib = GetInventoryFunctionLibrary()
+    if not lib then return "no function library" end
+
+    local granted, failed = 0, 0
+    local function grantOne(path, equip)
+        local assetOk, asset = pcall(function() return StaticFindObject(path) end)
+        if not assetOk or not asset or not SafeIsValid(asset) then
+            failed = failed + 1
+            return
+        end
+        local handleOk, handle = pcall(function() return lib:GetItemHandle(player, asset, itemLevel) end)
+        if not handleOk or not handle then
+            failed = failed + 1
+            return
+        end
+        local addOk = pcall(function()
+            if equip then
+                inv:TryAddAndEquipItem(handle, false)
+            else
+                inv:TryAddItem(handle, 1, false)
+            end
+        end)
+        if addOk then granted = granted + 1 else failed = failed + 1 end
+    end
+
+    for _, w in ipairs(BEST_GEAR_WEAPONS) do grantOne(w.path, w.equip) end
+    for _, a in ipairs(BEST_GEAR_ARMOR) do grantOne(a.path, a.equip) end
+    for _, j in ipairs(BEST_GEAR_JEWELRY) do grantOne(j, false) end
+
+    return string.format("granted=%d failed=%d", granted, failed)
+end
+
+-- DIAGNOSTIC (2026-09-04): GiveBestGear reports granted=N failed=0 but the item that actually
+-- lands in the inventory is always wrong ("Bee Smoker" quest item) - the ItemHandle struct
+-- returned by GetItemHandle is suspected to be garbage/zeroed. Its own fields aren't listed
+-- anywhere in the static UE4SS_ObjectDump.txt under the expected "DogwoodInventory.ItemHandle:"
+-- path, so dump them live via reflection (UScriptStruct supports ForEachProperty same as
+-- UClass) plus the actual field values of one freshly-created test handle, read-only (no
+-- TryAddItem/TryAddAndEquipItem call here - this cannot grant/pollute anything).
+local DumpedItemHandleFields = false
+local function DumpItemHandleDiagnosticsOnce(player)
+    if DumpedItemHandleFields then return end
+    if not player or not SafeIsValid(player) then return end
+    local lib = GetInventoryFunctionLibrary()
+    if not lib then return end
+    DumpedItemHandleFields = true
+
+    local structOk, struct = pcall(function() return StaticFindObject("/Script/DogwoodInventory.ItemHandle") end)
+    if structOk and struct and SafeIsValid(struct) then
+        local propOk, propErr = pcall(function()
+            struct:ForEachProperty(function(prop)
+                local nameOk, name = pcall(function() return prop:GetFName():ToString() end)
+                local typeOk, ptype = pcall(function() return prop:GetClass():GetFName():ToString() end)
+                print(string.format("[DawnwalkerModBridge] ItemHandle field: %s (%s)",
+                    nameOk and name or "?", tostring(typeOk and ptype or "?")))
+            end)
+        end)
+        if not propOk then
+            print("[DawnwalkerModBridge] ItemHandle field dump failed: " .. tostring(propErr))
+        end
+    else
+        print("[DawnwalkerModBridge] ItemHandle struct lookup failed")
+    end
+
+    -- Build one real handle for a known-good test item and log its resulting field values.
+    local testPath = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordDawnwalker5a.ITM_Weapon_SwordDawnwalker5a"
+    local assetOk, asset = pcall(function() return StaticFindObject(testPath) end)
+    if assetOk and asset and SafeIsValid(asset) then
+        local handleOk, handle = pcall(function() return lib:GetItemHandle(player, asset, 1) end)
+        if handleOk and handle then
+            print("[DawnwalkerModBridge] Test handle created for " .. testPath .. ", dumping field values:")
+            if structOk and struct and SafeIsValid(struct) then
+                pcall(function()
+                    struct:ForEachProperty(function(prop)
+                        local nameOk, name = pcall(function() return prop:GetFName():ToString() end)
+                        if nameOk then
+                            local valOk, val = pcall(function() return handle[name] end)
+                            print(string.format("[DawnwalkerModBridge] Test handle field %s = %s",
+                                name, tostring(valOk and val or "?")))
+                        end
+                    end)
+                end)
+            end
+        else
+            print("[DawnwalkerModBridge] Test handle creation failed: " .. tostring(handle))
+        end
+    else
+        print("[DawnwalkerModBridge] Test item asset lookup failed for " .. testPath)
+    end
+end
+
 local function GetCameraManager()
     return FindFirstOf("PlayerCameraManager")
 end
@@ -221,6 +349,12 @@ end
 local LastPlayerAddress = nil
 local CombatSettleTicksRemaining = 0
 local MovementSettleTicksRemaining = 0
+-- Separate from CombatSettleTicksRemaining (pawn-address-change based): a 2026-09-03 crash
+-- landed right as the combat component itself flipped from not-found to found after an 11
+-- minute gap with NO pawn address change at all (likely a loading screen/cutscene), so the
+-- address-based settle window had already expired and gave zero protection. This counter
+-- gates on that transition directly, whatever caused it.
+local CombatComponentSettleTicksRemaining = 0
 local function RefreshPawnSettleState()
     local playerOk, player = pcall(UEHelpers.GetPlayer)
     if not playerOk or not player or not SafeIsValid(player) then return nil end
@@ -243,6 +377,9 @@ local function RefreshPawnSettleState()
         -- CheatManagerEnablerMod logs "Constructed CheatManager" on every respawn, meaning the
         -- native God() toggle from the old CheatManager instance doesn't carry over either.
         WasNativeGodModeApplied = false
+        -- New pawn means a fresh attribute set at its real default - force a re-apply rather than
+        -- assuming the old pawn's value (or lack of one) still matches.
+        LastAppliedDamageMultiplier = nil
     else
         if CombatSettleTicksRemaining > 0 then
             CombatSettleTicksRemaining = CombatSettleTicksRemaining - 1
@@ -261,6 +398,20 @@ end
 -- BaseValues table, cleared on every respawn) so repeated ticks don't compound the multiplier.
 local DAMAGE_MULTIPLIER_ATTRS = { "MeleeDamageMultiplier", "ClawsDamageMultiplier", "UnarmedDamageMultiplier", "MagicDamageMultiplier" }
 local DamageMultiplierDiagLogCount = 0
+local LastAppliedDamageMultiplier = nil
+
+-- Diagnostics (2026-09-03) showed these hold their real per-hit magnitude (hundreds) in
+-- CurrentValue while BaseValue stays 0 - some other system (the equipped weapon, most likely)
+-- drives CurrentValue via a GameplayEffect modifier, unlike the near-inert 0/0 XDamageMultiplier
+-- attrs above. Skipped: BaseUnarmedDamage/BaseMagicDamage/Damage/DealtDamage/HybridDamage, which
+-- read 0.0 even in CurrentValue (nothing to multiply).
+local BASE_DAMAGE_VALUE_ATTRS = {
+    "WeaponDamageMin", "WeaponDamageMax", "BaseMeleeDamage",
+    "BaseUnarmedDamageMin", "BaseUnarmedDamageMax",
+    "BaseClawsDamageMin", "BaseClawsDamageMax",
+    "BaseAbilityDamage", "BaseVampireAbilityDamage"
+}
+
 local function ApplyDamageMultiplier(player, multiplier)
     local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
     if not ascOk or not asc or not SafeIsValid(asc) then return end
@@ -289,9 +440,14 @@ local function ApplyDamageMultiplier(player, multiplier)
         local base = BaseValues[cacheKey]
         local writeOk
         if base then
+            -- Diagnostics (2026-09-03) showed these read 0.0 by default, not 1.0 - the game
+            -- treats them as an additive "extra damage" bonus on top of the weapon's own damage,
+            -- not a scalar multiplier. Convert our 1x-is-neutral slider value into that convention:
+            -- multiplier=1 -> +0 (no change), multiplier=50 -> +49 (base damage plus 4900%).
+            local bonus = base + (multiplier - 1)
             writeOk = pcall(function()
-                attrSet[attrName].CurrentValue = base * multiplier
-                attrSet[attrName].BaseValue = base * multiplier
+                attrSet[attrName].CurrentValue = bonus
+                attrSet[attrName].BaseValue = bonus
             end)
         end
         if diagLog then
@@ -301,12 +457,69 @@ local function ApplyDamageMultiplier(player, multiplier)
                 attrName, tostring(base), tostring(multiplier), tostring(writeOk), tostring(currentOk and currentVal or "unknown")))
         end
     end
+
+    for _, attrName in ipairs(BASE_DAMAGE_VALUE_ATTRS) do
+        local cacheKey = "dmgBaseVal_" .. attrName
+        if BaseValues[cacheKey] == nil then
+            -- Cache CurrentValue (not BaseValue, which is 0 here) as the multiplication anchor.
+            local readOk, current = pcall(function() return attrSet[attrName].CurrentValue end)
+            if readOk and current ~= nil and current > 0 then BaseValues[cacheKey] = current end
+        end
+        local base = BaseValues[cacheKey]
+        local writeOk
+        if base then
+            -- Real per-hit damage magnitude, so a genuine scalar multiply is the right convention
+            -- here (unlike the additive bonus used for the 0-based XDamageMultiplier attrs above).
+            writeOk = pcall(function() attrSet[attrName].CurrentValue = base * multiplier end)
+        end
+        if diagLog then
+            local currentOk, currentVal = pcall(function() return attrSet[attrName].CurrentValue end)
+            print(string.format(
+                "[DawnwalkerModBridge] DamageValue diag: %s base=%s multiplier=%s writeOk=%s currentAfterWrite=%s",
+                attrName, tostring(base), tostring(multiplier), tostring(writeOk), tostring(currentOk and currentVal or "unknown")))
+        end
+    end
+end
+
+-- Read-only, independent of ApplyDamageMultiplier's write cadence - lets us see whether the raw
+-- write actually holds over time or gets silently reverted (e.g. by the ASC's own aggregator
+-- recalculating CurrentValue from BaseValue + active GameplayEffect modifiers on some other
+-- trigger), since the game showing no extra damage despite writeOk=true could mean either the
+-- write isn't read by the damage formula at all, or it's read but doesn't stay set.
+local function ReadDamageMultiplierLiveValue(player)
+    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
+    if not ascOk or not asc or not SafeIsValid(asc) then return nil end
+    if not CharacterAttributeSetClass or not SafeIsValid(CharacterAttributeSetClass) then return nil end
+    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(CharacterAttributeSetClass) end)
+    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return nil end
+    local currentOk, currentVal = pcall(function() return attrSet.MeleeDamageMultiplier.CurrentValue end)
+    local baseOk, baseVal = pcall(function() return attrSet.MeleeDamageMultiplier.BaseValue end)
+    return currentOk and currentVal or nil, baseOk and baseVal or nil
+end
+
+-- Same steady-hold check as ReadDamageMultiplierLiveValue, but for one of the real damage-
+-- magnitude attrs (unlike MeleeDamageMultiplier, this one is actively GE-driven at rest, so it's
+-- not yet confirmed our direct write survives whatever recomputes it).
+local function ReadWeaponDamageLiveValue(player)
+    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
+    if not ascOk or not asc or not SafeIsValid(asc) then return nil end
+    if not CharacterAttributeSetClass or not SafeIsValid(CharacterAttributeSetClass) then return nil end
+    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(CharacterAttributeSetClass) end)
+    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return nil end
+    local currentOk, currentVal = pcall(function() return attrSet.WeaponDamageMax.CurrentValue end)
+    return currentOk and currentVal or nil
 end
 
 local function ApplyCommand()
     local player = RefreshPawnSettleState()
     local combatSettling = CombatSettleTicksRemaining > 0
     local movementSettling = MovementSettleTicksRemaining > 0
+
+    -- ItemHandle diagnostic isn't tied to a specific pawn, but still wait for the settle window
+    -- since it does create a real handle via the inventory function library.
+    if not combatSettling and not movementSettling then
+        pcall(function() DumpItemHandleDiagnosticsOnce(player) end)
+    end
 
     local command = ReadCommandFile()
     local status = { bridgeLoaded = 1, ok = 0 }
@@ -356,7 +569,29 @@ local function ApplyCommand()
                     status.setLevelRejected = "out_of_range"
                 end
             end
+            if command.giveBestGear == "1" then
+                -- DISABLED (2026-09-04): GetItemHandle is confirmed to produce a broken handle -
+                -- every grant call reports success but the wrong item (a "Bee Smoker" quest item)
+                -- actually lands in the inventory, flooding it. Do NOT re-enable
+                -- (set PendingGiveBestGear = true here) until DumpItemHandleDiagnosticsOnce's
+                -- output below has been reviewed and the real cause fixed.
+                LastGiveBestGearResult = "disabled: wrong-item bug not yet fixed - see repo memory"
+            end
         end
+
+        if PendingGiveBestGear then
+            if combatSettling or movementSettling then
+                LastGiveBestGearResult = "pending: waiting for pawn to settle"
+            else
+                local levelOk, curLevel = pcall(function() return subsystem:GetCurrentLevel() end)
+                local itemLevel = (levelOk and tonumber(curLevel)) or 1
+                local resultOk, result = pcall(function() return GiveBestGear(player, math.floor(itemLevel)) end)
+                LastGiveBestGearResult = resultOk and result or ("error: " .. tostring(result))
+                PendingGiveBestGear = false
+                print("[DawnwalkerModBridge] GiveBestGear: " .. tostring(LastGiveBestGearResult))
+            end
+        end
+        status.giveBestGearResult = LastGiveBestGearResult
 
         local levelOk, level = pcall(function() return subsystem:GetCurrentLevel() end)
         local xpOk, xp = pcall(function() return subsystem:GetCurrentXP() end)
@@ -471,8 +706,17 @@ local function ApplyCommand()
             if not WasCombatFound then
                 print("[DawnwalkerModBridge] Combat component found for player")
                 WasCombatFound = true
+                CombatComponentSettleTicksRemaining = 3
             end
             status.combatFound = 1
+            local componentSettling = CombatComponentSettleTicksRemaining > 0
+            status.combatComponentSettling = componentSettling and 1 or 0
+            if componentSettling then
+                -- Don't touch this component at all yet: it just transitioned from not-found to
+                -- found (independent of any pawn-address change, e.g. after a loading screen or
+                -- cutscene), the exact same hazard class as a freshly-spawned pawn.
+                CombatComponentSettleTicksRemaining = CombatComponentSettleTicksRemaining - 1
+            else
             -- SetHealthPercent(1.0) alone only corrects health once per poll (1s); combat damage
             -- lands in real time and can still kill the player in the gap between polls. LockHealth
             -- freezes the stat against damage entirely, which is what actually stops death - the
@@ -515,12 +759,18 @@ local function ApplyCommand()
                 -- speed/jump this can't clip the player through geometry, so there's no physics
                 -- reason to keep it tight.
                 if dmgMult and dmgMult >= 0.1 and dmgMult <= 50 then
-                    -- Same raw-struct-write hazard as ForceDirectHealthAttribute: bypasses all
-                    -- engine-side validity checks, so skip it once the game considers the
-                    -- character dead (fail-open on error, same as the health path).
-                    local aliveOk, isAlive = pcall(function() return combat:IsAlive() end)
-                    if not (aliveOk and isAlive == false) then
-                        ApplyDamageMultiplier(player, dmgMult)
+                    -- Unlike health/stamina, nothing fights this value back tick-to-tick - only
+                    -- touch the raw struct when the pawn is new or the requested value actually
+                    -- changed, instead of every 1s poll, to cut exposure to this write's crash risk.
+                    if dmgMult ~= LastAppliedDamageMultiplier then
+                        -- Same raw-struct-write hazard as ForceDirectHealthAttribute: bypasses all
+                        -- engine-side validity checks, so skip it once the game considers the
+                        -- character dead (fail-open on error, same as the health path).
+                        local aliveOk, isAlive = pcall(function() return combat:IsAlive() end)
+                        if not (aliveOk and isAlive == false) then
+                            ApplyDamageMultiplier(player, dmgMult)
+                            LastAppliedDamageMultiplier = dmgMult
+                        end
                     end
                     status.damageMultiplierApplied = 1
                 else
@@ -528,6 +778,12 @@ local function ApplyCommand()
                     status.damageMultiplierRejected = "out_of_range"
                 end
             end
+            -- Read-only check every tick, independent of the write-on-change gate above, so we
+            -- can see in status.txt/UE4SS.log whether the value drifts back down on its own.
+            local liveCurrent, liveBase = ReadDamageMultiplierLiveValue(player)
+            status.damageMultiplierLiveCurrent = liveCurrent
+            status.damageMultiplierLiveBase = liveBase
+            status.weaponDamageMaxLiveCurrent = ReadWeaponDamageLiveValue(player)
             status.healthLocked = (lockHealthOk == true) and 1 or 0
             status.staminaLocked = (lockStaminaOk == true) and 1 or 0
             local hpOk, hp = pcall(function() return combat:GetHealthPercentage() end)
@@ -539,8 +795,10 @@ local function ApplyCommand()
             status.rawHealth = LastRawHealth
             status.rawMaxHealth = LastRawMaxHealth
             status.directHealthWriteOk = LastDirectHealthWriteOk
+            end
         else
             WasCombatFound = false
+            CombatComponentSettleTicksRemaining = 0
             status.combatFound = 0
         end
     end

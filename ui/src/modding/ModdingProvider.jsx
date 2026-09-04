@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { ModdingContext } from "./ModdingContext";
 import { createUnavailableGameplayAdapter } from "./gameplayAdapter";
+import { mergeGameplayState } from "./mergeGameplayState";
 import {
   DEFAULT_ADVANCED,
   DEFAULT_COMBAT,
@@ -39,29 +40,12 @@ const DEFAULT_GAMEPLAY = {
   vfx: DEFAULT_VFX
 };
 
-function mergeGameplayState(base, incoming) {
-  const next = { ...(base ?? {}) };
-
-  for (const [key, value] of Object.entries(incoming ?? {})) {
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      next[key] = mergeGameplayState(base?.[key], value);
-      continue;
-    }
-
-    next[key] = value;
-  }
-
-  return next;
-}
-
 // Reads persisted state once; returns null when nothing is stored yet or parsing fails
 function readPersistedState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    console.debug("[Modding] Loaded storage key:", STORAGE_KEY, parsed);
-    return parsed;
+    return JSON.parse(raw);
   } catch (e) {
     console.warn("[Modding] Failed to load modding state", e);
     return null;
@@ -85,23 +69,19 @@ export function ModdingProvider({ children }) {
       createdAt: new Date().toISOString(),
       data: { gameplay: starterGameplay }
     };
-    console.debug("[Modding] Creating starter preset:", starter);
     return [starter];
   });
 
   // Persist whenever gameplay or presets change
   useEffect(() => {
     try {
-      const payload = { gameplay, presets };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-      console.debug("[Modding] Persisted modding state to localStorage", payload);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ gameplay, presets }));
     } catch (e) {
       console.warn("[Modding] Failed to persist modding state", e);
     }
   }, [gameplay, presets]);
 
   const updateGameplay = useCallback((path, value) => {
-    console.debug("[Modding] updateGameplay", path, value);
     setGameplay((prev) => {
       const next = { ...prev };
       const parts = path.split(".");
@@ -122,13 +102,11 @@ export function ModdingProvider({ children }) {
       createdAt: new Date().toISOString(),
       data: { gameplay }
     };
-    console.debug("[Modding] Saving preset", preset);
     setPresets((p) => [preset, ...p].slice(0, 50));
   }, [gameplay]);
 
   const loadPreset = useCallback((index) => {
     const preset = presets[index];
-    console.debug("[Modding] loadPreset index:", index, "preset:", preset);
     if (preset && preset.data && preset.data.gameplay) {
       setGameplay((g) => mergeGameplayState(g, preset.data.gameplay));
     } else {
@@ -137,20 +115,16 @@ export function ModdingProvider({ children }) {
   }, [presets]);
 
   const removePreset = useCallback((index) => {
-    console.debug("[Modding] removePreset index:", index);
     setPresets((p) => p.filter((_, i) => i !== index));
   }, []);
 
   const exportAll = useCallback(() => {
-    const out = JSON.stringify({ gameplay, presets }, null, 2);
-    console.debug("[Modding] exportAll called, size:", out.length);
-    return out;
+    return JSON.stringify({ gameplay, presets }, null, 2);
   }, [gameplay, presets]);
 
   const importAll = useCallback((jsonString) => {
     try {
       const parsed = JSON.parse(jsonString);
-      console.debug("[Modding] importAll parsed:", parsed);
       if (parsed.gameplay) setGameplay((g) => mergeGameplayState(g, parsed.gameplay));
       if (Array.isArray(parsed.presets)) setPresets(parsed.presets);
       return true;
@@ -161,7 +135,6 @@ export function ModdingProvider({ children }) {
   }, []);
 
   const resetGameplay = useCallback(() => {
-    console.debug("[Modding] resetGameplay -> DEFAULT_GAMEPLAY");
     setGameplay(DEFAULT_GAMEPLAY);
   }, []);
 

@@ -497,11 +497,48 @@ function isBridgeDeployed() {
 let bridgeRequestCounter = 0;
 // Full desired-state, always written in full so one apply call never clobbers another's fields.
 let bridgeState = {};
+let bridgeStateSeeded = false;
+
+// bridgeState only lives in this process's memory - an app restart resets it to {} even though
+// command.txt on disk still holds every setting from the previous run. Without this, the first
+// control touched after a restart would overwrite command.txt with just that one field, silently
+// dropping infiniteHealth/infiniteStamina/etc and letting the player die again mid-session.
+function ensureBridgeStateSeeded(paths) {
+  if (bridgeStateSeeded) return;
+  bridgeStateSeeded = true;
+  const existing = readText(paths.commandFile);
+  if (existing) {
+    const seeded = {};
+    for (const line of existing.split(/\r?\n/)) {
+      const [key, ...rest] = line.split("=");
+      if (!key) continue;
+      seeded[key] = rest.join("=");
+    }
+    bridgeState = { ...seeded, ...bridgeState };
+    const seededRequestId = Number(seeded.requestId);
+    if (Number.isFinite(seededRequestId) && seededRequestId > bridgeRequestCounter) {
+      bridgeRequestCounter = seededRequestId;
+    }
+  }
+}
+
+// The renderer's page components unmount/remount on every navigation (App.jsx swaps pages via
+// conditional render, not a persistent router), which would otherwise reset their local slider/
+// toggle state back to hardcoded defaults - this lets them re-hydrate from the real last-applied
+// values on mount instead of always showing 1x/off.
+function getBridgeCommandState() {
+  const paths = getBridgePaths();
+  if (!paths) return {};
+  ensureBridgeStateSeeded(paths);
+  return { ...bridgeState };
+}
 
 function writeBridgeCommand(patch) {
   const paths = getBridgePaths();
   if (!paths) return { ok: false, error: "Game install was not found" };
   if (!isBridgeDeployed()) return { ok: false, error: "Bridge mod is not deployed yet" };
+
+  ensureBridgeStateSeeded(paths);
 
   bridgeState = { ...bridgeState, ...patch };
 
@@ -530,6 +567,11 @@ function applyLevelCap(cap) {
   const numericCap = Math.max(1, Math.min(99, Math.floor(Number(cap))));
   if (!Number.isFinite(numericCap)) return { ok: false, error: "Invalid level cap" };
   return writeBridgeCommand({ levelCap: numericCap });
+}
+
+function applyGiveBestGear() {
+  bridgeRequestCounter += 1;
+  return writeBridgeCommand({ requestId: bridgeRequestCounter, giveBestGear: 1 });
 }
 
 function applyInfiniteHealth(enabled) {
@@ -633,8 +675,10 @@ app.whenReady().then(() => {
   ipcMain.handle("game:compare-saves", (_event, leftName, rightName) => compareSaves(leftName, rightName));
   ipcMain.handle("bridge:deploy", () => deployBridge());
   ipcMain.handle("bridge:status", () => readBridgeStatus());
+  ipcMain.handle("bridge:get-command", () => getBridgeCommandState());
   ipcMain.handle("bridge:apply-level", (_event, level) => applyPlayerLevel(level));
   ipcMain.handle("bridge:apply-level-cap", (_event, cap) => applyLevelCap(cap));
+  ipcMain.handle("bridge:give-best-gear", () => applyGiveBestGear());
   ipcMain.handle("bridge:apply-infinite-health", (_event, enabled) => applyInfiniteHealth(enabled));
   ipcMain.handle("bridge:apply-infinite-stamina", (_event, enabled) => applyInfiniteStamina(enabled));
   ipcMain.handle("bridge:apply-speed", (_event, mult) => applySpeedMultiplier(mult));

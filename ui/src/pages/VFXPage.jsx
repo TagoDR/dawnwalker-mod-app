@@ -1,10 +1,10 @@
+import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import RuneStagger from "../components/ui/RuneStagger";
 import DWSlider from "../components/ui/DWSlider";
 import DWToggle from "../components/ui/DWToggle";
 import DWButton from "../components/ui/DWButton";
 import { useVFX } from "../vfx/core/VFXContext";
-import { useTheme } from "../theme/useTheme";
 import { useGameData } from "../data/useGameData";
 import { useModding } from "../modding/useModding";
 import { DEFAULT_VFX } from "../modding/gameplayDefaults";
@@ -22,7 +22,6 @@ const sliders = [
 ];
 
 export default function VFXPage() {
-  const { theme } = useTheme();
   const game = useGameData();
   const { corruption, intensity, setCorruption, setIntensity } = useVFX();
   const { updateGameplay, savePreset } = useModding();
@@ -55,25 +54,7 @@ export default function VFXPage() {
 
   return (
     <div>
-      <h1
-        style={{
-          marginBottom: "10px",
-          color: theme.colors.gold,
-          letterSpacing: "1px",
-          textTransform: "uppercase",
-        }}
-      >
-        Visual Effects
-      </h1>
-
-      <div
-        style={{
-          height: "2px",
-          background: theme.colors.divider,
-          boxShadow: `0 0 10px ${theme.colors.glow}`,
-          marginBottom: "20px",
-        }}
-      />
+      <PageHeader title="Visual Effects" />
 
       <RuneStagger index={0}>
         <RuneSection title="Dawn & Night Atmosphere">

@@ -1,9 +1,11 @@
+import { useEffect, useState } from "react";
 import { useTheme } from "../theme/useTheme";
 import { useGameData } from "../data/useGameData";
 import { useModding } from "../modding/useModding";
 import { DEFAULT_COMBAT } from "../modding/gameplayDefaults";
 import { useToast } from "../modding/useToast";
 
+import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import RuneStagger from "../components/ui/RuneStagger";
 
@@ -12,8 +14,81 @@ import DWToggle from "../components/ui/DWToggle";
 import DWSelect from "../components/ui/DWSelect";
 import DWButton from "../components/ui/DWButton";
 
-export default function CombatPage() {
+// Talks to the UE4SS bridge mod (runtime-mods/DawnwalkerModBridge) through the Electron main process.
+// Everything else on this page is a cosmetic profile stored in localStorage (see useModding/updateGameplay).
+function DamageMultiplierControl() {
   const { theme } = useTheme();
+  const bridge = typeof window !== "undefined" ? window.dawnwalker : null;
+  const [damageMultiplier, setDamageMultiplier] = useState(1);
+  const [applied, setApplied] = useState(null);
+  const [message, setMessage] = useState(null);
+
+  useEffect(() => {
+    if (!bridge) return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const result = await bridge.bridgeStatus();
+        if (!cancelled) setApplied(result?.damageMultiplierApplied === "1");
+      } catch {
+        if (!cancelled) setApplied(null);
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [bridge]);
+
+  // This component mounts fresh every time the user navigates back to Combat & Experience, so
+  // without this the slider would show 1x again even though the real applied value is still set.
+  useEffect(() => {
+    if (!bridge) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const state = await bridge.getBridgeCommandState();
+        if (!cancelled && state?.damageMultiplier !== undefined) {
+          setDamageMultiplier(Number(state.damageMultiplier));
+        }
+      } catch {
+        // Non-fatal: falls back to the default slider value.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge]);
+
+  if (!bridge) {
+    return <p style={{ opacity: 0.78 }}>The live game bridge is only available in the desktop app.</p>;
+  }
+
+  const handleDamageMultiplier = async (value) => {
+    setDamageMultiplier(value);
+    const result = await bridge.applyDamageMultiplier(value);
+    setMessage(result.ok ? null : result.error);
+  };
+
+  return (
+    <>
+      <DWSlider
+        label="Damage Multiplier"
+        value={damageMultiplier}
+        onChange={handleDamageMultiplier}
+        min={0.1}
+        max={50}
+        step={0.1}
+      />
+      <p style={{ opacity: 0.78 }}>Applied to the running game: {applied ? "Yes" : "No"}</p>
+      {message && <p style={{ color: theme.colors.gold }}>{message}</p>}
+    </>
+  );
+}
+
+export default function CombatPage() {
   const game = useGameData();
   const { gameplay, updateGameplay, savePreset } = useModding();
   const toast = useToast();
@@ -35,36 +110,12 @@ export default function CombatPage() {
 
   return (
     <div>
-      <h1
-        style={{
-          marginBottom: "10px",
-          color: theme.colors.gold,
-          letterSpacing: "1px",
-          textTransform: "uppercase",
-        }}
-      >
-        Combat & Experience
-      </h1>
-
-      <div
-        style={{
-          height: "2px",
-          background: theme.colors.divider,
-          boxShadow: `0 0 10px ${theme.colors.glow}`,
-          marginBottom: "20px",
-        }}
-      />
+      <PageHeader title="Combat & Experience" />
 
       {/* Rune‑staggered sections */}
       <RuneStagger index={0}>
         <RuneSection title="Player Combat Stats">
-          <DWSlider
-            label="Base Damage"
-            value={combat.player.damage}
-            onChange={(v) => updateGameplay("combat.player.damage", v)}
-            min={0}
-            max={500}
-          />
+          <DamageMultiplierControl />
 
           <DWSlider
             label="Critical Chance (%)"

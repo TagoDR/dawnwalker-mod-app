@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mergeGameplayState } from './mergeGameplayState.js';
 
 const DEFAULT_GAMEPLAY = {
   xpMultiplier: 1,
@@ -8,18 +9,6 @@ const DEFAULT_GAMEPLAY = {
   advanced: { ai: { difficulty: 'Normal', reactionTime: 250 } },
   skills: { points: { skillPoints: 10 } },
 };
-
-function mergeGameplayState(base, incoming) {
-  const next = { ...base };
-  for (const [key, value] of Object.entries(incoming || {})) {
-    if (value && typeof value === 'object' && !Array.isArray(value) && value !== null) {
-      next[key] = mergeGameplayState(base[key] && typeof base[key] === 'object' ? base[key] : {}, value);
-    } else {
-      next[key] = value;
-    }
-  }
-  return next;
-}
 
 test('mergeGameplayState preserves nested defaults while applying incoming overrides', () => {
   const incoming = {

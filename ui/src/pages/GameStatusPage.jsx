@@ -2,6 +2,7 @@ import { useTheme } from "../theme/useTheme";
 import { useGameData } from "../data/useGameData";
 import DWButton from "../components/ui/DWButton";
 import DWSelect from "../components/ui/DWSelect";
+import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import { useState } from "react";
 import { TRAINER_CAPABILITIES } from "../modding/gameplayAdapter";
@@ -47,10 +48,7 @@ export default function GameStatusPage() {
 
   return (
     <div>
-      <h1 style={{ marginBottom: 10, color: theme.colors.gold, textTransform: "uppercase" }}>
-        Install & Capabilities
-      </h1>
-      <div style={{ height: 2, background: theme.colors.divider, boxShadow: `0 0 10px ${theme.colors.glow}`, marginBottom: 20 }} />
+      <PageHeader title="Install & Capabilities" />
 
       {game.loading ? (
         <p style={{ opacity: 0.8 }}>Scanning Steam libraries for The Blood of Dawnwalker...</p>

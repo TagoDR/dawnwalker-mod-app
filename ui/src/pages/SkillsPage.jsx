@@ -1,9 +1,9 @@
-import { useTheme } from "../theme/useTheme";
 import { useGameData } from "../data/useGameData";
 import { useModding } from "../modding/useModding";
 import { DEFAULT_SKILLS } from "../modding/gameplayDefaults";
 import { useToast } from "../modding/useToast";
 
+import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import RuneStagger from "../components/ui/RuneStagger";
 
@@ -13,7 +13,6 @@ import DWSelect from "../components/ui/DWSelect";
 import DWButton from "../components/ui/DWButton";
 
 export default function SkillsPage() {
-  const { theme } = useTheme();
   const game = useGameData();
   const { gameplay, updateGameplay, savePreset } = useModding();
   const toast = useToast();
@@ -35,25 +34,7 @@ export default function SkillsPage() {
 
   return (
     <div>
-      <h1
-        style={{
-          marginBottom: "10px",
-          color: theme.colors.gold,
-          letterSpacing: "1px",
-          textTransform: "uppercase",
-        }}
-      >
-        Skills & Progression
-      </h1>
-
-      <div
-        style={{
-          height: "2px",
-          background: theme.colors.divider,
-          boxShadow: `0 0 10px ${theme.colors.glow}`,
-          marginBottom: "20px",
-        }}
-      />
+      <PageHeader title="Skills & Progression" />
 
       {/* Rune‑staggered sections */}
       <RuneStagger index={0}>

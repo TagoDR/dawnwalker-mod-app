@@ -3,6 +3,7 @@ import { useTheme } from "../theme/useTheme";
 import { useModding } from "../modding/useModding";
 import DWButton from "../components/ui/DWButton";
 import DWSelect from "../components/ui/DWSelect";
+import PageHeader from "../components/ui/PageHeader";
 import SavePresetModal from "../modding/SavePresetModal";
 import { useToast } from "../modding/useToast";
 
@@ -48,7 +49,7 @@ function SaveLoadInner() {
 
   return (
     <div>
-      <h1 style={{ color: theme.colors.gold, textTransform: "uppercase" }}>Profiles & Backups</h1>
+      <PageHeader title="Profiles & Backups" />
 
       <div style={{ marginTop: 12 }}>
         <h3>Presets</h3>
