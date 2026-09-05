@@ -1,6 +1,40 @@
+/**
+ * Public API exposed to the renderer via the Electron preload bridge.
+ *
+ * This is intentionally a narrow, IPC-backed surface: the renderer can call
+ * these methods, but it cannot access Node, the filesystem, or the game install
+ * directly. All live gameplay writes still flow through the main process and
+ * the verified bridge protocol.
+ *
+ * @typedef {Object} DawnwalkerAPI
+ * @property {() => Promise<Object>} scanInstall
+ * @property {() => Promise<Object>} backupUserData
+ * @property {(leftName: string, rightName: string) => Promise<Object>} compareSaves
+ * @property {() => Promise<Object>} deployBridge
+ * @property {() => Promise<Object>} bridgeStatus
+ * @property {() => Promise<Object>} getBridgeCommandState
+ * @property {(level: number) => Promise<Object>} applyLevel
+ * @property {(cap: number) => Promise<Object>} applyLevelCap
+ * @property {(enabled: boolean) => Promise<Object>} applyInfiniteHealth
+ * @property {(enabled: boolean) => Promise<Object>} applyInfiniteStamina
+ * @property {(mult: number) => Promise<Object>} applySpeedMultiplier
+ * @property {(mult: number) => Promise<Object>} applyJumpMultiplier
+ * @property {(mult: number) => Promise<Object>} applyFovMultiplier
+ * @property {(speed: number) => Promise<Object>} applyGameSpeed
+ * @property {(mult: number) => Promise<Object>} applyDamageMultiplier
+ * @property {(amount: number) => Promise<Object>} nukeTarget
+ * @property {(key: string, value: any) => Promise<Object>} applyBridgeField
+ * @property {(values: Object) => Promise<Object>} applyBridgePreset
+ * @property {() => Promise<Object>} resetBridge
+ * @property {(name: string, arg: any) => Promise<Object>} runBridgeAction
+ * @property {() => Promise<Object>} deployNativeFix
+ * @property {() => Promise<Object>} nativeFixStatus
+ * @property {(gearId: string) => Promise<Object>} giveGearNative
+ * @property {(gearId: string) => Promise<Object>} removeGearNative
+ */
 const { contextBridge, ipcRenderer } = require("electron");
 
-contextBridge.exposeInMainWorld("dawnwalker", {
+const dawnwalkerApi = {
 	scanInstall: () => ipcRenderer.invoke("game:scan"),
 	backupUserData: () => ipcRenderer.invoke("game:backup-user-data"),
 	compareSaves: (leftName, rightName) => ipcRenderer.invoke("game:compare-saves", leftName, rightName),
@@ -29,4 +63,6 @@ contextBridge.exposeInMainWorld("dawnwalker", {
 	nativeFixStatus: () => ipcRenderer.invoke("nativefix:status"),
 	giveGearNative: (gearId) => ipcRenderer.invoke("nativefix:give-gear", gearId),
 	removeGearNative: (gearId) => ipcRenderer.invoke("nativefix:remove-gear", gearId),
-});
+};
+
+contextBridge.exposeInMainWorld("dawnwalker", Object.freeze(dawnwalkerApi));

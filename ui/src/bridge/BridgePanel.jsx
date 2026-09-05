@@ -21,7 +21,19 @@ export default function BridgePanel({ bridgeApi, title = "Live Game Bridge", int
   const deployed = status?.deployed;
   const handshaken = status?.ok && status?.awaitingHandshake !== "1";
   const inCutscene = status?.cutsceneActive === "1";
-  const responding = !status?.ok ? "No" : !handshaken ? "Connecting…" : inCutscene ? "Paused (cutscene)" : "Yes";
+  const staleHeartbeat = status?.heartbeatStale === "1";
+  const responding = !status?.ok ? "No" : !handshaken ? "Connecting…" : inCutscene ? "Paused (cutscene)" : staleHeartbeat ? "Stale" : "Yes";
+  const statusSummary = !status ? "Waiting for bridge status…" : !status.gameRunning
+    ? "The game is not running."
+    : !deployed
+      ? "The bridge mod is not deployed yet."
+      : staleHeartbeat
+        ? "The bridge heartbeat is stale; writes are paused until the game reconnects."
+        : inCutscene
+          ? "Writes are paused while a cutscene or unsafe world state is active."
+          : !handshaken
+            ? "Waiting for the game to acknowledge the current boot."
+            : "The bridge is connected and ready for live writes.";
 
   return (
     <>
@@ -32,6 +44,7 @@ export default function BridgePanel({ bridgeApi, title = "Live Game Bridge", int
           <span>Bridge mod: <strong>{deployed ? "Deployed" : "Not deployed"}</strong></span>
           <span>Mod responding: <strong>{responding}</strong></span>
         </div>
+        <p style={{ opacity: 0.82, marginTop: 0, marginBottom: 8 }}>{statusSummary}</p>
         {status?.actionResult && (
           <p style={{ opacity: 0.85 }}>Last action: <span style={{ fontFamily: "var(--mono)" }}>{status.actionResult}</span></p>
         )}
