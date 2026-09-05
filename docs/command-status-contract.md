@@ -61,11 +61,15 @@ The status file is the runtime output report from the Lua bridge.
 | --- | --- | --- |
 | `ok` | `0`/`1` | bridge is currently healthy |
 | `bootId` | string | active boot identifier |
+| `awaitingHandshake` | `0`/`1` | the game has not yet acknowledged the current app boot |
+| `appConnected` | `0`/`1` | the app heartbeat is still being seen by the runtime |
 | `cutsceneActive` | `0`/`1` | whether cutscene gating is active |
 | `healthLocked` | `0`/`1` | health lock status |
 | `staminaLocked` | `0`/`1` | stamina lock status |
 | `bloodLocked` | `0`/`1` | blood lock status |
 | `actionResult` | string | last action status/result |
+
+> `gameRunning` is tracked by the Electron app, not emitted by the Lua bridge status.txt. The app-side `gameRunning` value is derived from the live process scan and is used by the UI as a top-level game-state signal.
 
 ## Supported runtime surface
 

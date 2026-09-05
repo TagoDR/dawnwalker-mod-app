@@ -21,18 +21,18 @@ export default function BridgePanel({ bridgeApi, title = "Live Game Bridge", int
   const deployed = status?.deployed;
   const handshaken = status?.ok && status?.awaitingHandshake !== "1";
   const inCutscene = status?.cutsceneActive === "1";
-  const staleHeartbeat = status?.heartbeatStale === "1";
-  const responding = !status?.ok ? "No" : !handshaken ? "Connecting…" : inCutscene ? "Paused (cutscene)" : staleHeartbeat ? "Stale" : "Yes";
+  const appConnected = status?.appConnected === undefined ? true : status.appConnected === "1";
+  const responding = !status?.ok ? "No" : inCutscene ? "Paused (cutscene)" : !handshaken ? "Connecting…" : !appConnected ? "Disconnected" : "Yes";
   const statusSummary = !status ? "Waiting for bridge status…" : !status.gameRunning
     ? "The game is not running."
     : !deployed
       ? "The bridge mod is not deployed yet."
-      : staleHeartbeat
-        ? "The bridge heartbeat is stale; writes are paused until the game reconnects."
-        : inCutscene
-          ? "Writes are paused while a cutscene or unsafe world state is active."
-          : !handshaken
-            ? "Waiting for the game to acknowledge the current boot."
+      : inCutscene
+        ? "Writes are paused while a cutscene or unsafe world state is active."
+        : !handshaken
+          ? "Waiting for the game to acknowledge the current boot."
+          : !appConnected
+            ? "The app connection dropped; writes are paused until the game reconnects."
             : "The bridge is connected and ready for live writes.";
 
   return (

@@ -34,6 +34,14 @@
  */
 const { contextBridge, ipcRenderer } = require("electron");
 
+function deepFreeze(value) {
+	if (value && (typeof value === "object" || typeof value === "function") && !Object.isFrozen(value)) {
+		Object.freeze(value);
+		for (const nestedValue of Object.values(value)) deepFreeze(nestedValue);
+	}
+	return value;
+}
+
 const dawnwalkerApi = {
 	scanInstall: () => ipcRenderer.invoke("game:scan"),
 	backupUserData: () => ipcRenderer.invoke("game:backup-user-data"),
@@ -65,4 +73,4 @@ const dawnwalkerApi = {
 	removeGearNative: (gearId) => ipcRenderer.invoke("nativefix:remove-gear", gearId),
 };
 
-contextBridge.exposeInMainWorld("dawnwalker", Object.freeze(dawnwalkerApi));
+contextBridge.exposeInMainWorld("dawnwalker", deepFreeze(dawnwalkerApi));

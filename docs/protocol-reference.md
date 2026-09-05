@@ -101,12 +101,15 @@ actionResult=ok
 
 - `ok`: bridge is successfully responding and applied logic is healthy.
 - `bootId`: active game boot identifier.
+- `awaitingHandshake`: `1` when the game has not yet acknowledged the active app boot.
+- `appConnected`: `1` while the app heartbeat is still live; `0` when the app has disconnected.
 - `cutsceneActive`: `1` when unsafe cutscene conditions are active.
 - `healthLocked`: `1` if health lock state is active.
 - `staminaLocked`: `1` if stamina lock state is active.
 - `bloodLocked`: `1` if blood lock state is active.
 - `actionResult`: last one-shot action status or result string.
-- `gameRunning`: whether the game is active or not in the app-side state model.
+
+Note: `gameRunning` is app-side state, not a Lua status file field. It is set by the Electron process based on process detection and can be read from the app API layer.
 
 ## Safety model
 
