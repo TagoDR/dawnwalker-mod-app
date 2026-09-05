@@ -18,18 +18,27 @@ This makes the project more of a controlled runtime control panel than a broad c
 
 ## What it does
 
-The app communicates with a Lua runtime bridge that reads a simple command file and writes a status file back to the game mod environment. Through that bridge, it can manage a curated set of in-game settings and one-shot actions, including:
+The app communicates with a Lua runtime bridge that reads a simple command file and writes a status file back to the game mod environment, plus a native C++ UE4SS mod for the things Lua cannot do. Through those, it can manage a curated set of in-game settings and one-shot actions, including:
 
 - health, stamina, and blood toggles
 - movement speed, jump strength, FOV, and movement mode changes
 - game speed and difficulty values
-- carry weight and damage multipliers
+- carry weight adjustment and a damage amplifier
 - progression helpers such as XP, trait points, mutation charges, and level cap adjustments
-- recipe unlocking and ingredient injection
+- item granting: every weapon, armor set, armor piece, ring, amulet, consumable and crafting ingredient in the game, each with a selectable amount
+- recipe unlocking
 - map reveal, fast-travel unlock, and time-of-day actions
-- utility actions like heal, refill blood, kill target, and teleport
+- utility actions like heal, refill blood, clear hostile enemies, and teleport
 
 The app intentionally rejects unknown settings and invalid input, and the bridge enforces additional runtime safety checks before applying changes.
+
+### Why a native mod as well as Lua
+
+Item granting requires the game's `FItemHandle` struct, which has no reflected fields and therefore cannot be marshalled through UE4SS's Lua layer at all. The native mod copies its raw bytes between reflection calls instead. Everything else — every toggle, action and status readout — runs through the Lua bridge.
+
+### Damage amplifier
+
+The game's per-hit damage calculation could not be reached: it is not driven by any reachable attribute, and the Blueprint function that builds the damage effect cannot be hooked on this engine build. Rather than keep guessing, the amplifier works from the other side. It watches each hostile enemy's health and re-applies whatever drop the game just dealt, scaled by the chosen multiplier, so a normal hit lands as an Nx hit. It uses only the health functions that are confirmed to work on enemy combat components.
 
 ## Safety model
 
@@ -46,6 +55,10 @@ Writes are paused during unsafe states to reduce the risk of applying changes wh
 
 ### Reset on shutdown
 When the app closes, it resets the live bridge state and restores defaults instead of leaving the game stuck with a persistent override.
+
+### No raw attribute writes
+
+Earlier versions wrote directly into the game's gameplay-attribute structs to try to force stat changes. That bypassed every engine-side validity check and was the one pattern in this project with a genuine crash history, so it has been removed entirely. Every remaining feature calls a function the game itself exposes.
 
 ### Renderer bridge contract
 The Electron renderer does not access the filesystem or game binaries directly. Instead, it receives a narrow, frozen `window.dawnwalker` API through the preload bridge and every call is forwarded to the main process via IPC.
@@ -64,15 +77,33 @@ This keeps the UI sandboxed while preserving the real security boundary: all gam
 │   └── DawnwalkerModBridge/
 │       └── Scripts/
 │           └── main.lua       # Live Lua bridge that reads commands and writes status
-├── native-mods/                # Native C++ integration pieces
+├── native-mods/
+│   ├── DawnwalkerNativeFix/   # C++ UE4SS mod: item granting via raw FItemHandle copies
+│   └── dist/                  # Prebuilt DLL the app deploys, so users need no toolchain
 ├── test/                       # Node-based tests for validation and safety logic
-├── tools/                      # Utility scripts for dumps, inspection, and smoke-testing
+├── tools/                      # Catalog generators, item-name merging, dump inspection
 ├── ui/                         # React + Vite desktop interface
 │   ├── src/
 │   ├── package.json
 │   └── vite.config.js
 └── build/                      # Packaging / app resources
 ```
+
+## Surviving game updates
+
+Both mods bind to the game by name — there are no hardcoded memory offsets anywhere — so ordinary patches generally keep working, and anything that does break fails soft rather than crashing.
+
+The risk is that a failed lookup looks identical to a control that simply does nothing. Two features exist to make that visible:
+
+**Check Game Compatibility** (Gear page) resolves every class, function and object the app depends on in a single pass and reports exactly what is missing, writing each miss to `UE4SS.log`. Run it after a game update. It also reports item counts per category, which is the early warning that a content patch has invalidated the item catalogs.
+
+**Item catalogs** are generated from the game's own asset list rather than hand-written. After a content patch, regenerate them with `tools/gengear.js` and `tools/gencraftables.js` from a fresh object dump.
+
+Engine version changes are the one dependency outside this project's control, since the native mod is built against a pinned UE4SS revision.
+
+## Item names
+
+Item display names live in a localisation string table packed inside the game's `.pak`, and the game populates it lazily — only items it has actually drawn on screen resolve. The bridge captures them automatically whenever an in-game menu is open, logging only names it has not already seen. `tools/parseitemnames.js` extracts them from `UE4SS.log` and `tools/applyitemnames.js` merges them into the catalog labels. Names accumulate across sessions, so repeated play fills the catalog in.
 
 ## Requirements
 
