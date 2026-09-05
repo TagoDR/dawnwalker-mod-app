@@ -5,7 +5,6 @@ import DWSelect from "../components/ui/DWSelect";
 import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import { useState } from "react";
-import { TRAINER_CAPABILITIES } from "../modding/gameplayAdapter";
 
 const signalLabels = {
   unrealPackDirectory: "Unreal Content/Paks directory",
@@ -59,7 +58,7 @@ export default function GameStatusPage() {
       ) : !game.installed ? (
         <RuneSection title="Steam Installation Not Found">
           <p>Steam app ID 3751260 was not found in the standard Steam library locations.</p>
-          <p style={{ opacity: 0.78 }}>No game files were changed. Manual folder selection will be added after the released installation structure is verified.</p>
+          <p style={{ opacity: 0.78 }}>No game files were changed. Install the game through Steam, then rescan.</p>
           <DWButton label="Scan Steam Libraries" onClick={game.refresh} />
         </RuneSection>
       ) : (
@@ -69,8 +68,7 @@ export default function GameStatusPage() {
             <p style={{ overflowWrap: "anywhere" }}>{game.path}</p>
             <p style={{ overflowWrap: "anywhere" }}>Game root: {game.scan.gameRoot}</p>
             <p>Build ID: {game.scan.buildId || "Not reported by Steam"}</p>
-            <p>Game process: {game.scan.gameRunning ? "Running (read-only scan only)" : "Not running"}</p>
-            <p>Cheat Evolution: {game.scan.trainerRunning ? "Running" : "Not running"}</p>
+            <p>Game process: {game.scan.gameRunning ? "Running" : "Not running"}</p>
             <p>Executables: {game.scan.executableFiles.length ? game.scan.executableFiles.join(", ") : "None found at install root"}</p>
             <DWButton label="Rescan Installation" onClick={game.refresh} />
           </RuneSection>
@@ -197,14 +195,17 @@ export default function GameStatusPage() {
               <p>Status: {game.scan.runtimeLoader.status}</p>
               <p>Loader markers: {game.scan.runtimeLoader.foundMarkers.length ? game.scan.runtimeLoader.foundMarkers.join(", ") : "None found"}</p>
               <p>Runtime mod directories: {game.scan.runtimeLoader.modDirectories.length ? game.scan.runtimeLoader.modDirectories.join(", ") : "None found"}</p>
-              <p>Gameplay controls: {game.scan.runtimeLoader.supported ? "Runtime profile support available" : "Not active"}</p>
-              <p style={{ opacity: 0.78 }}>The app does not install loaders, inject DLLs, or alter game binaries. Game-specific runtime hooks must be verified before enabling gameplay changes.</p>
+              <p>Live gameplay controls: {game.scan.runtimeLoader.supported ? "Available - deploy the bridge mod from any gameplay page" : "Unavailable until UE4SS is installed"}</p>
+              <p style={{ opacity: 0.78 }}>
+                This app never patches game binaries. It installs two UE4SS mods (DawnwalkerModBridge Lua script and
+                the DawnwalkerNativeFix DLL) into the existing UE4SS Mods folder and talks to them through text files.
+              </p>
             </RuneSection>
           </div>
 
           <div style={{ marginTop: 16 }}>
             <RuneSection title="Gameplay Runtime Candidates">
-              <p style={{ opacity: 0.78 }}>These symbols are present in Dawnwalker.exe and identify likely runtime targets. Presence does not yet prove a safe hook or editable value.</p>
+              <p style={{ opacity: 0.78 }}>Symbols present in Dawnwalker.exe that identify the runtime systems the bridge mod targets.</p>
               <div style={{ display: "grid", gap: 7 }}>
                 {game.scan.gameplaySymbols.map((candidate) => (
                   <div key={candidate.symbol} style={{ display: "flex", justifyContent: "space-between", gap: 16, borderBottom: `1px solid ${theme.colors.divider}`, paddingBottom: 6 }}>
@@ -216,22 +217,8 @@ export default function GameStatusPage() {
             </RuneSection>
           </div>
 
-          <div style={{ marginTop: 16 }}>
-            <RuneSection title="Trainer Capability Map">
-              <p style={{ opacity: 0.78 }}>Mapped from the verified FearLess trainer listing. The trainer backend is not connected to this app yet.</p>
-              <div style={{ display: "grid", gap: 7 }}>
-                {TRAINER_CAPABILITIES.map((capability) => (
-                  <div key={`${capability.page}-${capability.control}`} style={{ display: "flex", justifyContent: "space-between", gap: 16, borderBottom: `1px solid ${theme.colors.divider}`, paddingBottom: 6 }}>
-                    <span>{capability.page}: {capability.control}</span>
-                    <strong>{capability.supported ? capability.trainerOption : "Unavailable"}</strong>
-                  </div>
-                ))}
-              </div>
-            </RuneSection>
-          </div>
-
           <p style={{ marginTop: 16, opacity: 0.78 }}>
-            This scan does not install, unpack, patch, or alter any game files. Mod installation remains unavailable until a supported format is verified.
+            This scan does not install, unpack, patch, or alter any game files.
           </p>
         </>
       )}

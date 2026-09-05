@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { sanitizeField, sanitizePreset, sanitizeAction } = require("./bridge-protocol");
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL;
 const STEAM_APP_ID = "3751260";
@@ -22,19 +23,6 @@ function isDawnwalkerRunning() {
       { encoding: "utf8" }
     );
     return output.toLowerCase().includes("dawnwalker.exe");
-  } catch {
-    return false;
-  }
-}
-
-function isCheatEvolutionRunning() {
-  try {
-    const output = require("child_process").execFileSync(
-      "tasklist",
-      ["/FI", "IMAGENAME eq CheatEvolution.exe", "/NH"],
-      { encoding: "utf8" }
-    );
-    return output.toLowerCase().includes("cheatevolution.exe");
   } catch {
     return false;
   }
@@ -394,7 +382,6 @@ function inspectInstall(installPath, manifestPath = null) {
     gameName: vdfValue(manifest, "name") || path.basename(installPath),
     buildId: vdfValue(manifest, "buildid"),
     gameRunning: isDawnwalkerRunning(),
-    trainerRunning: isCheatEvolutionRunning(),
     executableFiles,
     inventory,
     inventorySummary,
@@ -494,43 +481,44 @@ function isBridgeDeployed() {
   return fs.existsSync(path.join(paths.scriptsDir, "main.lua"));
 }
 
-let bridgeRequestCounter = 0;
-// Full desired-state, always written in full so one apply call never clobbers another's fields.
+// Desired game state, always written in full so one apply call never clobbers another's fields.
+// Deliberately NOT restored from disk: every app start (and every game launch) begins at the
+// game's own defaults, and the user opts into changes via controls/presets.
 let bridgeState = {};
-let bridgeStateSeeded = false;
+// The Lua mod ignores command.txt until it carries the id of the CURRENT game boot (advertised
+// in status.txt), so settings from a previous session can never apply during a new load.
+let knownBootId = null;
+let bootResets = 0;
+let lastNonce = 0;
 
-// bridgeState only lives in this process's memory - an app restart resets it to {} even though
-// command.txt on disk still holds every setting from the previous run. Without this, the first
-// control touched after a restart would overwrite command.txt with just that one field, silently
-// dropping infiniteHealth/infiniteStamina/etc and letting the player die again mid-session.
-function ensureBridgeStateSeeded(paths) {
-  if (bridgeStateSeeded) return;
-  bridgeStateSeeded = true;
-  const existing = readText(paths.commandFile);
-  if (existing) {
-    const seeded = {};
-    for (const line of existing.split(/\r?\n/)) {
-      const [key, ...rest] = line.split("=");
-      if (!key) continue;
-      seeded[key] = rest.join("=");
-    }
-    bridgeState = { ...seeded, ...bridgeState };
-    const seededRequestId = Number(seeded.requestId);
-    if (Number.isFinite(seededRequestId) && seededRequestId > bridgeRequestCounter) {
-      bridgeRequestCounter = seededRequestId;
-    }
-  }
+// One-shot request ids only need to differ from whatever the Lua side last handled; time-based
+// ids stay unique across app restarts without persisting a counter.
+function nextNonce() {
+  lastNonce = Math.max(Date.now(), lastNonce + 1);
+  return lastNonce;
 }
 
-// The renderer's page components unmount/remount on every navigation (App.jsx swaps pages via
-// conditional render, not a persistent router), which would otherwise reset their local slider/
-// toggle state back to hardcoded defaults - this lets them re-hydrate from the real last-applied
-// values on mount instead of always showing 1x/off.
 function getBridgeCommandState() {
-  const paths = getBridgePaths();
-  if (!paths) return {};
-  ensureBridgeStateSeeded(paths);
-  return { ...bridgeState };
+  return { ...bridgeState, bootId: knownBootId, bootResets };
+}
+
+// Every write carries the current boot id (handshake) and a fresh heartbeat; the Lua mod releases
+// all settings when the heartbeat stops changing (~20 s) or when it sees appClosed=1, so a closed
+// (or crashed) app always hands the game back to its defaults. Written via temp-file + rename so
+// the mod never reads a half-written file.
+function writeCommandFile(paths, entries) {
+  fs.mkdirSync(paths.bridgeDir, { recursive: true });
+  const lines = Object.entries(entries)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}=${value}`);
+  const data = `${lines.join("\n")}\n`;
+  const tmpFile = `${paths.commandFile}.tmp`;
+  try {
+    fs.writeFileSync(tmpFile, data);
+    fs.renameSync(tmpFile, paths.commandFile);
+  } catch {
+    fs.writeFileSync(paths.commandFile, data);
+  }
 }
 
 function writeBridgeCommand(patch) {
@@ -538,20 +526,59 @@ function writeBridgeCommand(patch) {
   if (!paths) return { ok: false, error: "Game install was not found" };
   if (!isBridgeDeployed()) return { ok: false, error: "Bridge mod is not deployed yet" };
 
-  ensureBridgeStateSeeded(paths);
-
   bridgeState = { ...bridgeState, ...patch };
 
   try {
-    fs.mkdirSync(paths.bridgeDir, { recursive: true });
-    const lines = Object.entries(bridgeState)
-      .filter(([, value]) => value !== undefined && value !== null)
-      .map(([key, value]) => `${key}=${value}`);
-    fs.writeFileSync(paths.commandFile, `${lines.join("\n")}\n`);
+    writeCommandFile(paths, { bootId: knownBootId, heartbeat: Date.now(), ...bridgeState });
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message || "Failed to write bridge command" };
   }
+}
+
+// Periodic proof-of-life for the Lua mod (see writeCommandFile). Only meaningful once a boot has
+// been acknowledged; rewriting the same state with a new heartbeat changes nothing else.
+function writeHeartbeat() {
+  if (!knownBootId) return;
+  const paths = getBridgePaths();
+  if (!paths || !isBridgeDeployed()) return;
+  try {
+    writeCommandFile(paths, { bootId: knownBootId, heartbeat: Date.now(), ...bridgeState });
+  } catch {
+    // Best effort - the next heartbeat retries.
+  }
+}
+
+// Back to game defaults: forget every desired setting and hand the Lua mod an empty (but
+// acknowledged) command file so it releases anything it's currently holding. `closing` marks the
+// file so the mod releases immediately instead of waiting for the heartbeat to time out.
+function resetBridgeState(closing = false) {
+  bridgeState = {};
+  const paths = getBridgePaths();
+  if (!paths || !isBridgeDeployed()) return { ok: true };
+  try {
+    if (!knownBootId) {
+      writeCommandFile(paths, {});
+    } else if (closing) {
+      writeCommandFile(paths, { bootId: knownBootId, appClosed: 1 });
+    } else {
+      writeCommandFile(paths, { bootId: knownBootId, heartbeat: Date.now() });
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || "Failed to reset bridge command" };
+  }
+}
+
+// Called with every status.txt read: a bootId we haven't acknowledged means the game (re)started,
+// so drop back to game defaults and acknowledge the new boot.
+function syncBootId(status) {
+  const bootId = status.bootId;
+  if (!bootId || bootId === knownBootId) return;
+  if (knownBootId !== null) bootResets += 1;
+  knownBootId = bootId;
+  resetBridgeState();
+  clearNativeFixCommand();
 }
 
 function applyPlayerLevel(level) {
@@ -559,75 +586,53 @@ function applyPlayerLevel(level) {
   // and ForceLevelUpTo() with a higher level reads past the end of the table and crashes the game.
   const numericLevel = Math.max(1, Math.min(99, Math.floor(Number(level))));
   if (!Number.isFinite(numericLevel)) return { ok: false, error: "Invalid level" };
-  bridgeRequestCounter += 1;
-  return writeBridgeCommand({ requestId: bridgeRequestCounter, setLevel: numericLevel });
+  return writeBridgeCommand({ requestId: nextNonce(), setLevel: numericLevel });
 }
 
-function applyLevelCap(cap) {
-  const numericCap = Math.max(1, Math.min(99, Math.floor(Number(cap))));
-  if (!Number.isFinite(numericCap)) return { ok: false, error: "Invalid level cap" };
-  return writeBridgeCommand({ levelCap: numericCap });
+// Persistent (re-applied every tick by the Lua mod) command.txt fields and one-shot actions are
+// validated by the shared bridge-protocol module (unit-tested, Electron-free).
+function applyBridgeField(key, value) {
+  const result = sanitizeField(key, value);
+  if (!result.ok) return result;
+  return writeBridgeCommand({ [result.key]: result.value });
 }
 
-function applyGiveBestGear() {
-  bridgeRequestCounter += 1;
-  return writeBridgeCommand({ requestId: bridgeRequestCounter, giveBestGear: 1 });
+// Applies a whole saved preset of persistent fields at once.
+function applyBridgePreset(values) {
+  const result = sanitizePreset(values);
+  if (!result.ok) return result;
+  return writeBridgeCommand(result.patch);
 }
 
-function applyInfiniteHealth(enabled) {
-  return writeBridgeCommand({ infiniteHealth: enabled ? 1 : 0 });
-}
-
-function applyInfiniteStamina(enabled) {
-  return writeBridgeCommand({ infiniteStamina: enabled ? 1 : 0 });
-}
-
-function applySpeedMultiplier(mult) {
-  const numericMult = Math.max(0.1, Math.min(5, Number(mult)));
-  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid speed multiplier" };
-  return writeBridgeCommand({ speedMultiplier: numericMult });
-}
-
-function applyJumpMultiplier(mult) {
-  const numericMult = Math.max(0.1, Math.min(5, Number(mult)));
-  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid jump multiplier" };
-  return writeBridgeCommand({ jumpMultiplier: numericMult });
-}
-
-function applyFovMultiplier(mult) {
-  const numericMult = Math.max(0.1, Math.min(5, Number(mult)));
-  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid FOV multiplier" };
-  return writeBridgeCommand({ fovMultiplier: numericMult });
-}
-
-function applyGameSpeed(speed) {
-  const numericSpeed = Math.max(0.1, Math.min(4, Number(speed)));
-  if (!Number.isFinite(numericSpeed)) return { ok: false, error: "Invalid game speed" };
-  return writeBridgeCommand({ gameSpeed: numericSpeed });
-}
-
-function applyDamageMultiplier(mult) {
-  const numericMult = Math.max(0.1, Math.min(10, Number(mult)));
-  if (!Number.isFinite(numericMult)) return { ok: false, error: "Invalid damage multiplier" };
-  return writeBridgeCommand({ damageMultiplier: numericMult });
-}
-
-let nukeRequestCounter = 0;
+function applyLevelCap(cap) { return applyBridgeField("levelCap", cap); }
+function applyInfiniteHealth(enabled) { return applyBridgeField("infiniteHealth", enabled); }
+function applyInfiniteStamina(enabled) { return applyBridgeField("infiniteStamina", enabled); }
+function applySpeedMultiplier(mult) { return applyBridgeField("speedMultiplier", mult); }
+function applyJumpMultiplier(mult) { return applyBridgeField("jumpMultiplier", mult); }
+function applyFovMultiplier(mult) { return applyBridgeField("fovMultiplier", mult); }
+function applyGameSpeed(speed) { return applyBridgeField("gameSpeed", speed); }
+function applyDamageMultiplier(mult) { return applyBridgeField("damageMultiplier", mult); }
 
 function applyNukeTarget(amount) {
   const numericAmount = Math.max(1, Math.min(999999, Number(amount)));
   if (!Number.isFinite(numericAmount)) return { ok: false, error: "Invalid damage amount" };
-  nukeRequestCounter += 1;
-  return writeBridgeCommand({ nukeRequestId: nukeRequestCounter, nukeDamage: numericAmount });
+  return writeBridgeCommand({ nukeRequestId: nextNonce(), nukeDamage: numericAmount });
+}
+
+// One-shot action executed once by the Lua mod (actionId nonce).
+function applyBridgeAction(name, arg) {
+  const result = sanitizeAction(name, arg);
+  if (!result.ok) return result;
+  return writeBridgeCommand({ actionId: nextNonce(), action: result.name, actionArg: result.arg });
 }
 
 function readBridgeStatus() {
   const paths = getBridgePaths();
-  if (!paths) return { ok: false, error: "Game install was not found", deployed: false, gameRunning: isDawnwalkerRunning() };
+  if (!paths) return { ok: false, error: "Game install was not found", deployed: false, gameRunning: isDawnwalkerRunning(), bootResets };
   const deployed = isBridgeDeployed();
   const content = readText(paths.statusFile);
   const gameRunning = isDawnwalkerRunning();
-  if (!content) return { ok: false, deployed, gameRunning, error: gameRunning ? "No status yet; is the game running with the bridge mod enabled?" : "Game is not running" };
+  if (!content) return { ok: false, deployed, gameRunning, bootResets, error: gameRunning ? "No status yet; is the game running with the bridge mod enabled?" : "Game is not running" };
 
   const status = {};
   for (const line of content.split(/\r?\n/)) {
@@ -635,15 +640,16 @@ function readBridgeStatus() {
     if (!key) continue;
     status[key] = rest.join("=");
   }
-  return { ok: status.ok === "1", deployed, gameRunning, ...status };
+  // A stale status.txt from a closed game must not be mistaken for a live boot.
+  if (gameRunning) syncBootId(status);
+  return { ok: status.ok === "1", deployed, gameRunning, bootResets, ...status };
 }
 
-// DawnwalkerNativeFix: a native UE4SS C++ mod (native-mods/DawnwalkerNativeFix) that replaces the
-// Lua GiveBestGear path, which was disabled after it was found to always grant the wrong item (see
-// runtime-mods/DawnwalkerModBridge/Scripts/main.lua's 2026-09-04 diagnostic comment). Lua's UFunction
-// marshalling turns the FItemHandle GetItemHandle returns into an empty table (it has zero reflected
-// properties), so the native mod instead calls GetItemHandle/TryAddItem via raw ProcessEvent and
-// memcpy's the struct's raw bytes directly - see native-mods/DawnwalkerNativeFix/dllmain.cpp.
+// DawnwalkerNativeFix: a native UE4SS C++ mod (native-mods/DawnwalkerNativeFix) that handles item
+// granting/removal. Lua's UFunction marshalling turns the FItemHandle GetItemHandle returns into an
+// empty table (it has zero reflected properties), so the native mod instead calls
+// GetItemHandle/TryAddItem via raw ProcessEvent and memcpy's the struct's raw bytes directly - see
+// native-mods/DawnwalkerNativeFix/dllmain.cpp.
 // Uses its own command.txt/status.txt under Mods/DawnwalkerNativeFix, separate from the bridge mod.
 const nativeFixDllSource = path.join(__dirname, "native-mods", "dist", "DawnwalkerNativeFix.dll");
 
@@ -699,6 +705,18 @@ function isNativeFixDeployed() {
   const paths = getNativeFixPaths();
   if (!paths) return false;
   return fs.existsSync(paths.dllFile);
+}
+
+// The native mod re-runs whatever request its command.txt last held on every game launch (its
+// dedup id lives in process memory), so the file is removed at app start and on each new game boot.
+function clearNativeFixCommand() {
+  const paths = getNativeFixPaths();
+  if (!paths) return;
+  try {
+    fs.rmSync(paths.commandFile, { force: true });
+  } catch {
+    // Best effort - a locked file just means the next boot clears it instead.
+  }
 }
 
 let nativeFixRequestCounter = 0;
@@ -789,6 +807,10 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Every app start begins at game defaults: nothing carried over from a previous run.
+  resetBridgeState();
+  clearNativeFixCommand();
+
   ipcMain.handle("game:scan", () => {
     const scan = scanSteamInstall();
     cachedGameRoot = scan.installed ? scan.gameRoot : null;
@@ -801,7 +823,10 @@ app.whenReady().then(() => {
   ipcMain.handle("bridge:get-command", () => getBridgeCommandState());
   ipcMain.handle("bridge:apply-level", (_event, level) => applyPlayerLevel(level));
   ipcMain.handle("bridge:apply-level-cap", (_event, cap) => applyLevelCap(cap));
-  ipcMain.handle("bridge:give-best-gear", () => applyGiveBestGear());
+  ipcMain.handle("bridge:apply-field", (_event, key, value) => applyBridgeField(key, value));
+  ipcMain.handle("bridge:apply-preset", (_event, values) => applyBridgePreset(values));
+  ipcMain.handle("bridge:action", (_event, name, arg) => applyBridgeAction(name, arg));
+  ipcMain.handle("bridge:reset", () => resetBridgeState());
   ipcMain.handle("nativefix:deploy", () => deployNativeFix());
   ipcMain.handle("nativefix:status", () => readNativeFixStatus());
   ipcMain.handle("nativefix:give-gear", (_event, gearId) => applyGiveGearNative(gearId));
@@ -815,6 +840,14 @@ app.whenReady().then(() => {
   ipcMain.handle("bridge:apply-damage-multiplier", (_event, mult) => applyDamageMultiplier(mult));
   ipcMain.handle("bridge:nuke-target", (_event, amount) => applyNukeTarget(amount));
   createWindow();
+
+  const heartbeatTimer = setInterval(writeHeartbeat, 5000);
+  app.on("before-quit", () => {
+    clearInterval(heartbeatTimer);
+    // Closing the app hands the game back to its defaults immediately.
+    resetBridgeState(true);
+    clearNativeFixCommand();
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

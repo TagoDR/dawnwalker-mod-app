@@ -3,10 +3,82 @@ import { useTheme } from "../theme/useTheme";
 
 import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
+import RuneStagger from "../components/ui/RuneStagger";
 import DWSelect from "../components/ui/DWSelect";
+import DWSlider from "../components/ui/DWSlider";
 import DWButton from "../components/ui/DWButton";
 
 import { GEAR_CATALOG, CLEANUP_CATALOG } from "../data/GearCatalog";
+import { useBridge, commandNumber } from "../bridge/useBridge";
+import BridgePanel, { Readouts, ActionRow, ButtonRow, Note } from "../bridge/BridgePanel";
+
+// Coins, crafting and carry weight go through the Lua bridge (InventoryComponent /
+// CraftingSubsystem) - unlike item granting, none of these need FItemHandle marshalling.
+function InventorySection() {
+  const api = useBridge();
+  const { status, command, busy, applyField, runAction } = api;
+  const [coins, setCoins] = useState(1000);
+  const [ingredientSets, setIngredientSets] = useState(1);
+
+  return (
+    <BridgePanel bridgeApi={api} title="Inventory (Lua bridge)">
+      <RuneStagger index={1}>
+        <RuneSection title="Coins">
+          <Readouts items={[["Coins", status?.coins]]} />
+          <ActionRow label="Add Coins" disabled={busy} onClick={() => runAction("addCoins", coins, "Coins sent to the game.")}>
+            <DWSlider label="Coin Amount" value={coins} onChange={setCoins} min={1} max={100000} step={1} />
+          </ActionRow>
+          <ActionRow label="Remove Coins" disabled={busy} onClick={() => runAction("addCoins", -coins, "Coin removal sent to the game.")}>
+            <Note>Uses InventoryComponent:AddCurrency with a negative amount.</Note>
+          </ActionRow>
+        </RuneSection>
+      </RuneStagger>
+
+      <RuneStagger index={2}>
+        <RuneSection title="Carry Weight">
+          <Readouts
+            items={[
+              ["Current weight", status?.carryWeight],
+              ["Weight limit", status?.carryWeightLimit],
+            ]}
+          />
+          <DWSlider
+            label="Carry Weight Multiplier"
+            value={commandNumber(command, "carryWeightMultiplier", 1)}
+            onChange={(v) => applyField("carryWeightMultiplier", v)}
+            min={0.1}
+            max={100}
+            step={0.1}
+          />
+        </RuneSection>
+      </RuneStagger>
+
+      <RuneStagger index={3}>
+        <RuneSection title="Crafting">
+          <ButtonRow>
+            <DWButton
+              label="Unlock All Recipes"
+              disabled={busy}
+              onClick={() => runAction("unlockAllRecipes", null, "Recipe unlock sent to the game.")}
+              data-clickpulse
+              data-glow
+            />
+          </ButtonRow>
+          <div style={{ marginTop: 12 }}>
+            <ActionRow
+              label="Add Ingredients"
+              disabled={busy}
+              onClick={() => runAction("addAllIngredients", ingredientSets, "Ingredients sent to the game.")}
+            >
+              <DWSlider label="Crafts' Worth of Ingredients (every recipe)" value={ingredientSets} onChange={setIngredientSets} min={1} max={10} />
+            </ActionRow>
+          </div>
+          <Note>CraftingSubsystem:UnlockAllCraftingRecipes / AddIngredientsForAllCraftingRecipes.</Note>
+        </RuneSection>
+      </RuneStagger>
+    </BridgePanel>
+  );
+}
 
 // One dropdown + "Grant" button for a single gear category (Weapon, Armor Set, Ring, Amulet).
 // Granting is scoped to whichever single option is selected, instead of dumping every item at
@@ -91,22 +163,20 @@ export default function GearPage() {
 
   return (
     <div>
-      <PageHeader title="Gear" />
+      <PageHeader title="Gear & Inventory" />
 
       {!bridge ? (
         <p style={{ opacity: 0.78 }}>Gear granting is only available in the desktop app.</p>
       ) : (
         <>
-          <RuneSection title="Native Fix Status">
+          <RuneSection title="Native Gear Mod Status">
             <p style={{ opacity: 0.78, marginBottom: 8 }}>
-              Uses the native DawnwalkerNativeFix mod: the old Lua path always granted the wrong item
-              (a "Bee Smoker" quest item) because Lua's UFunction marshalling can't see FItemHandle's
-              unreflected fields. The native mod copies the struct's raw bytes instead, and grants each
-              request one item per engine tick so the game's own quest/notification system isn't
-              flooded.
+              Item granting uses the native DawnwalkerNativeFix C++ mod: UE4SS Lua can't marshal the game's
+              FItemHandle struct (it has no reflected fields), so the native mod copies its raw bytes instead and
+              grants one item per engine tick so the game's quest/notification systems aren't flooded.
             </p>
             <p>Game running: {status?.gameRunning ? "Yes" : "No"}</p>
-            <p>Native fix mod deployed: {status?.deployed ? "Yes" : "No"}</p>
+            <p>Native mod deployed: {status?.deployed ? "Yes" : "No"}</p>
             <p>Last grant result: {status?.giveGearResult ?? "not yet requested"}</p>
             <p>Last granted gear id: {status?.giveGearId ?? "none"}</p>
             <p>Last removal result: {status?.removeGearResult ?? "not yet requested"}</p>
@@ -136,6 +206,8 @@ export default function GearPage() {
               onAction={handleRemove}
             />
           ))}
+
+          <InventorySection />
         </>
       )}
     </div>

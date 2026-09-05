@@ -1,141 +1,96 @@
-import { useGameData } from "../data/useGameData";
-import { useModding } from "../modding/useModding";
-import { DEFAULT_MOVEMENT } from "../modding/gameplayDefaults";
-import { useToast } from "../modding/useToast";
-
 import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import RuneStagger from "../components/ui/RuneStagger";
-
 import DWSlider from "../components/ui/DWSlider";
-import DWToggle from "../components/ui/DWToggle";
+import DWSelect from "../components/ui/DWSelect";
 import DWButton from "../components/ui/DWButton";
 
+import { useBridge, commandNumber, commandString } from "../bridge/useBridge";
+import BridgePanel, { Readouts, ButtonRow, Note } from "../bridge/BridgePanel";
+
+const MOVEMENT_MODES = [
+  { value: "walk", label: "Walk (normal)" },
+  { value: "fly", label: "Fly" },
+  { value: "ghost", label: "Ghost (fly + no collision)" },
+];
+
 export default function MovementPage() {
-  const game = useGameData();
-  const { gameplay, updateGameplay, savePreset } = useModding();
-  const toast = useToast();
-  const { movement } = gameplay;
-
-  if (game.loading) {
-    return <p style={{ opacity: 0.8 }}>Loading movement data…</p>;
-  }
-
-  function handleSave() {
-    savePreset("Movement Settings Save");
-    toast.push({ type: "success", text: "Saved Movement settings preset" });
-  }
-
-  function handleReset() {
-    updateGameplay("movement", DEFAULT_MOVEMENT);
-    toast.push({ type: "success", text: "Movement settings reset to defaults" });
-  }
+  const api = useBridge();
+  const { status, command, busy, applyField, runAction } = api;
 
   return (
     <div>
-      <PageHeader title="Movement & Stamina" />
+      <PageHeader title="Movement & Camera" />
 
-      {/* Rune‑staggered sections */}
       <RuneStagger index={0}>
-        <RuneSection title="Basic Movement">
-          <DWSlider
-            label="Walk Speed (%)"
-            value={movement.basic.walkSpeed}
-            onChange={(v) => updateGameplay("movement.basic.walkSpeed", v)}
-            min={50}
-            max={200}
-          />
+        <BridgePanel
+          bridgeApi={api}
+          intro="Movement, camera and time scale - applied live via the player's CharacterMovementComponent, PlayerCameraManager and the engine CheatManager."
+        >
+          <RuneStagger index={1}>
+            <RuneSection title="Movement">
+              <Readouts items={[["Movement component", status?.movementFound === "1" ? "tracked" : "not found yet"]]} />
+              <DWSlider
+                label="Player Speed Multiplier"
+                value={commandNumber(command, "speedMultiplier", 1)}
+                onChange={(v) => applyField("speedMultiplier", v)}
+                min={0.1}
+                max={5}
+                step={0.1}
+              />
+              <DWSlider
+                label="Jump Height Multiplier"
+                value={commandNumber(command, "jumpMultiplier", 1)}
+                onChange={(v) => applyField("jumpMultiplier", v)}
+                min={0.1}
+                max={5}
+                step={0.1}
+              />
+              <DWSelect
+                label="Movement Mode"
+                value={commandString(command, "movementMode", "walk")}
+                onChange={(v) => applyField("movementMode", v)}
+                options={MOVEMENT_MODES}
+              />
+              <Note>
+                Fly and Ghost are the engine's own cheat modes; switch back to Walk to land. They re-apply after
+                every respawn while selected.
+              </Note>
+              <ButtonRow>
+                <DWButton
+                  label="Teleport to Aim Point"
+                  disabled={busy}
+                  onClick={() => runAction("teleport", null, "Teleport sent to the game.")}
+                  data-clickpulse
+                  data-glow
+                />
+              </ButtonRow>
+            </RuneSection>
+          </RuneStagger>
 
-          <DWSlider
-            label="Run Speed (%)"
-            value={movement.basic.runSpeed}
-            onChange={(v) => updateGameplay("movement.basic.runSpeed", v)}
-            min={50}
-            max={300}
-          />
-
-          <DWSlider
-            label="Sprint Speed (%)"
-            value={movement.basic.sprintSpeed}
-            onChange={(v) => updateGameplay("movement.basic.sprintSpeed", v)}
-            min={50}
-            max={400}
-          />
-
-          <DWSlider
-            label="Jump Height (%)"
-            value={movement.basic.jumpHeight}
-            onChange={(v) => updateGameplay("movement.basic.jumpHeight", v)}
-            min={50}
-            max={300}
-          />
-
-          <DWToggle
-            label="Enable Fall Damage"
-            value={movement.basic.fallDamage}
-            onChange={(v) => updateGameplay("movement.basic.fallDamage", v)}
-          />
-        </RuneSection>
+          <RuneStagger index={2}>
+            <RuneSection title="Camera & Time Scale">
+              <DWSlider
+                label="Field of View Multiplier"
+                value={commandNumber(command, "fovMultiplier", 1)}
+                onChange={(v) => applyField("fovMultiplier", v)}
+                min={0.1}
+                max={5}
+                step={0.1}
+              />
+              <DWSlider
+                label="Game Speed"
+                value={commandNumber(command, "gameSpeed", 1)}
+                onChange={(v) => applyField("gameSpeed", v)}
+                min={0.1}
+                max={4}
+                step={0.1}
+              />
+              <Note>Game Speed uses the engine's Slomo time dilation; 1.0 is normal speed. The resulting FOV must stay within 10–170°, so multipliers that push past that are rejected by the mod.</Note>
+            </RuneSection>
+          </RuneStagger>
+        </BridgePanel>
       </RuneStagger>
-
-      <RuneStagger index={1}>
-        <RuneSection title="Stamina & Climbing">
-          <DWSlider
-            label="Stamina Drain Rate"
-            value={movement.stamina.drain}
-            onChange={(v) => updateGameplay("movement.stamina.drain", v)}
-            min={0}
-            max={50}
-          />
-
-          <DWSlider
-            label="Stamina Regeneration"
-            value={movement.stamina.regen}
-            onChange={(v) => updateGameplay("movement.stamina.regen", v)}
-            min={0}
-            max={100}
-          />
-
-          <DWSlider
-            label="Climb Speed (%)"
-            value={movement.stamina.climbSpeed}
-            onChange={(v) => updateGameplay("movement.stamina.climbSpeed", v)}
-            min={50}
-            max={200}
-          />
-        </RuneSection>
-      </RuneStagger>
-
-      <RuneStagger index={2}>
-        <RuneSection title="Dash Mechanics">
-          <DWToggle
-            label="Enable Dash Ability"
-            value={movement.dash.enabled}
-            onChange={(v) => updateGameplay("movement.dash.enabled", v)}
-          />
-
-          <DWSlider
-            label="Dash Cooldown (Seconds)"
-            value={movement.dash.cooldown}
-            onChange={(v) => updateGameplay("movement.dash.cooldown", v)}
-            min={0}
-            max={10}
-          />
-
-          <DWSlider
-            label="Dash Distance (Meters)"
-            value={movement.dash.distance}
-            onChange={(v) => updateGameplay("movement.dash.distance", v)}
-            min={1}
-            max={30}
-          />
-        </RuneSection>
-      </RuneStagger>
-
-      <div style={{ marginTop: 18, display: "flex", gap: 12 }}>
-        <DWButton label="Save Preset" onClick={handleSave} data-clickpulse data-glow />
-        <DWButton label="Reset to Defaults" onClick={handleReset} />
-      </div>
     </div>
   );
 }

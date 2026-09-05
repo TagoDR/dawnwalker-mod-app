@@ -1,31 +1,65 @@
-import { useMemo, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { VFXContext } from "./VFXContext";
-import { useModding } from "../../modding/useModding";
+
+// The app's own UI visual-effect settings (not game state). Persisted locally so the chosen
+// intensities survive an app restart.
+const STORAGE_KEY = "dawnwalker-vfx-v1";
+
+const DEFAULT_VFX = {
+  corruption: false,
+  intensity: {
+    ambientHaze: 55,
+    dawnRays: 60,
+    dawnParticles: 70,
+    nightfallMist: 55,
+    corruptionFog: 50,
+    themeSwitchFlare: 75,
+    corruptionPulse: 75,
+    runeStagger: 65,
+  },
+};
+
+function readPersisted() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") return DEFAULT_VFX;
+    return {
+      corruption: Boolean(parsed.corruption),
+      intensity: { ...DEFAULT_VFX.intensity, ...(parsed.intensity || {}) },
+    };
+  } catch {
+    return DEFAULT_VFX;
+  }
+}
 
 export default function VFXProvider({ theme, children }) {
-  const { gameplay, updateGameplay } = useModding();
-  const { corruption, intensity } = gameplay.vfx;
+  const [vfx, setVfx] = useState(readPersisted);
 
-  const setCorruption = useCallback(
-    (value) => updateGameplay("vfx.corruption", value),
-    [updateGameplay]
-  );
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(vfx));
+    } catch (error) {
+      console.warn("[VFX] Failed to persist settings", error);
+    }
+  }, [vfx]);
 
-  // Update intensity for a single effect
+  const setCorruption = useCallback((value) => setVfx((prev) => ({ ...prev, corruption: value })), []);
   const setEffectIntensity = useCallback(
-    (effect, value) => updateGameplay(`vfx.intensity.${effect}`, value),
-    [updateGameplay]
+    (effect, value) => setVfx((prev) => ({ ...prev, intensity: { ...prev.intensity, [effect]: value } })),
+    []
   );
+  const resetVfx = useCallback(() => setVfx(DEFAULT_VFX), []);
 
   const value = useMemo(
     () => ({
       theme,
-      corruption,
+      corruption: vfx.corruption,
       setCorruption,
-      intensity,
-      setIntensity: setEffectIntensity
+      intensity: vfx.intensity,
+      setIntensity: setEffectIntensity,
+      resetVfx,
     }),
-    [theme, corruption, intensity, setCorruption, setEffectIntensity],
+    [theme, vfx, setCorruption, setEffectIntensity, resetVfx]
   );
 
   return <VFXContext.Provider value={value}>{children}</VFXContext.Provider>;

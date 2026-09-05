@@ -4,13 +4,12 @@ import ThemeToggle from "./ThemeToggle";
 
 const pages = [
   "Install & Capabilities",
-  "Gameplay Profile",
-  "Gear",
+  "Character",
   "Skills & Progression",
-  "Day / Night & Timer",
-  "Combat & Experience",
-  "Movement & Stamina",
-  "Advanced Tuning",
+  "Combat",
+  "Movement & Camera",
+  "World & Time",
+  "Gear & Inventory",
   "Visual Effects",
   "Profiles & Backups",
 ];

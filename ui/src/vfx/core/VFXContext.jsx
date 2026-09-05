@@ -6,6 +6,7 @@ export const VFXContext = createContext({
   setCorruption: () => {},
   intensity: {},
   setIntensity: () => {},
+  resetVfx: () => {},
 });
 
 export function useVFX() {

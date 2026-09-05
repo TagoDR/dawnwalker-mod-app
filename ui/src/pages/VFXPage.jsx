@@ -5,9 +5,6 @@ import DWSlider from "../components/ui/DWSlider";
 import DWToggle from "../components/ui/DWToggle";
 import DWButton from "../components/ui/DWButton";
 import { useVFX } from "../vfx/core/VFXContext";
-import { useGameData } from "../data/useGameData";
-import { useModding } from "../modding/useModding";
-import { DEFAULT_VFX } from "../modding/gameplayDefaults";
 import { useToast } from "../modding/useToast";
 
 const sliders = [
@@ -21,24 +18,14 @@ const sliders = [
   ["runeStagger", "Rune Stagger"],
 ];
 
+// These control this app's own interface effects, not the game.
 export default function VFXPage() {
-  const game = useGameData();
-  const { corruption, intensity, setCorruption, setIntensity } = useVFX();
-  const { updateGameplay, savePreset } = useModding();
+  const { corruption, intensity, setCorruption, setIntensity, resetVfx } = useVFX();
   const toast = useToast();
 
-  if (game.loading) {
-    return <p style={{ opacity: 0.8 }}>Loading VFX settings…</p>;
-  }
-
-  function handleSave() {
-    savePreset("VFX Settings Save");
-    toast.push({ type: "success", text: "Saved VFX settings preset" });
-  }
-
   function handleReset() {
-    updateGameplay("vfx", DEFAULT_VFX);
-    toast.push({ type: "success", text: "VFX settings reset to defaults" });
+    resetVfx();
+    toast.push({ type: "success", text: "App visual effects reset to defaults" });
   }
 
   const renderSlider = ([effect, label]) => (
@@ -55,6 +42,9 @@ export default function VFXPage() {
   return (
     <div>
       <PageHeader title="Visual Effects" />
+      <p style={{ opacity: 0.78, marginBottom: 14 }}>
+        These settings control this app's own interface effects. They don't change the game.
+      </p>
 
       <RuneStagger index={0}>
         <RuneSection title="Dawn & Night Atmosphere">
@@ -80,7 +70,6 @@ export default function VFXPage() {
       </RuneStagger>
 
       <div style={{ marginTop: 18, display: "flex", gap: 12 }}>
-        <DWButton label="Save Preset" onClick={handleSave} data-clickpulse data-glow />
         <DWButton label="Reset to Defaults" onClick={handleReset} />
       </div>
     </div>

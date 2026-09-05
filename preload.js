@@ -17,7 +17,14 @@ contextBridge.exposeInMainWorld("dawnwalker", {
 	applyGameSpeed: (speed) => ipcRenderer.invoke("bridge:apply-game-speed", speed),
 	applyDamageMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-damage-multiplier", mult),
 	nukeTarget: (amount) => ipcRenderer.invoke("bridge:nuke-target", amount),
-	giveBestGear: () => ipcRenderer.invoke("bridge:give-best-gear"),
+	// Generic persistent field (infiniteBlood, noCooldowns, movementMode, difficulty, ...) - the
+	// main process validates the key against an allowlist and clamps the value.
+	applyBridgeField: (key, value) => ipcRenderer.invoke("bridge:apply-field", key, value),
+	applyBridgePreset: (values) => ipcRenderer.invoke("bridge:apply-preset", values),
+	// Forget every live setting and hand the game back its defaults.
+	resetBridge: () => ipcRenderer.invoke("bridge:reset"),
+	// One-shot action executed once by the Lua mod (grantXP, addCoins, killTarget, ...).
+	runBridgeAction: (name, arg) => ipcRenderer.invoke("bridge:action", name, arg),
 	deployNativeFix: () => ipcRenderer.invoke("nativefix:deploy"),
 	nativeFixStatus: () => ipcRenderer.invoke("nativefix:status"),
 	giveGearNative: (gearId) => ipcRenderer.invoke("nativefix:give-gear", gearId),

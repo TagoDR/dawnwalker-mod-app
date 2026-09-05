@@ -1,115 +1,130 @@
-import { useGameData } from "../data/useGameData";
-import { useModding } from "../modding/useModding";
-import { DEFAULT_SKILLS } from "../modding/gameplayDefaults";
-import { useToast } from "../modding/useToast";
+import { useState } from "react";
 
 import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import RuneStagger from "../components/ui/RuneStagger";
-
 import DWSlider from "../components/ui/DWSlider";
 import DWToggle from "../components/ui/DWToggle";
-import DWSelect from "../components/ui/DWSelect";
 import DWButton from "../components/ui/DWButton";
 
+import { useBridge, commandFlag } from "../bridge/useBridge";
+import BridgePanel, { Readouts, ActionRow, ButtonRow, Note } from "../bridge/BridgePanel";
+
 export default function SkillsPage() {
-  const game = useGameData();
-  const { gameplay, updateGameplay, savePreset } = useModding();
-  const toast = useToast();
-  const { skills } = gameplay;
-
-  if (game.loading) {
-    return <p style={{ opacity: 0.8 }}>Loading skill data…</p>;
-  }
-
-  function handleSave() {
-    savePreset("Skills Settings Save");
-    toast.push({ type: "success", text: "Saved Skills settings preset" });
-  }
-
-  function handleReset() {
-    updateGameplay("skills", DEFAULT_SKILLS);
-    toast.push({ type: "success", text: "Skills settings reset to defaults" });
-  }
+  const api = useBridge();
+  const { status, command, busy, applyField, runAction } = api;
+  const [traitDelta, setTraitDelta] = useState(5);
+  const [traitTotal, setTraitTotal] = useState(50);
+  const [mutationDelta, setMutationDelta] = useState(1);
 
   return (
     <div>
       <PageHeader title="Skills & Progression" />
 
-      {/* Rune‑staggered sections */}
       <RuneStagger index={0}>
-        <RuneSection title="Skill Point Allocation">
-          <DWSlider
-            label="Available Skill Points"
-            value={skills.points.skillPoints}
-            onChange={(v) => updateGameplay("skills.points.skillPoints", v)}
-            min={0}
-            max={100}
-          />
+        <BridgePanel
+          bridgeApi={api}
+          intro="Trait (skill) points, the trait tree, vampire mutation and ability cooldowns - all via CharacterDevelopmentSubsystem and FocusAbilitiesSubsystem."
+        >
+          <RuneStagger index={1}>
+            <RuneSection title="Trait Points">
+              <Readouts items={[["Unspent trait points", status?.traitPoints]]} />
+              <ActionRow
+                label="Add Points"
+                disabled={busy}
+                onClick={() => runAction("addTraitPoints", traitDelta, "Trait points sent to the game.")}
+              >
+                <DWSlider label="Points to Add" value={traitDelta} onChange={setTraitDelta} min={1} max={200} />
+              </ActionRow>
+              <ActionRow
+                label="Remove Points"
+                disabled={busy}
+                onClick={() => runAction("addTraitPoints", -traitDelta, "Trait point removal sent to the game.")}
+              >
+                <Note>Removes unspent points only - learned traits are untouched.</Note>
+              </ActionRow>
+              <ActionRow
+                label="Set Total"
+                disabled={busy}
+                onClick={() => runAction("setTraitPoints", traitTotal, "Trait point total sent to the game.")}
+              >
+                <DWSlider label="Set Unspent Points To" value={traitTotal} onChange={setTraitTotal} min={0} max={999} />
+              </ActionRow>
+            </RuneSection>
+          </RuneStagger>
 
-          <DWSlider
-            label="Passive Boost Strength"
-            value={skills.points.passiveBoost}
-            onChange={(v) => updateGameplay("skills.points.passiveBoost", v)}
-            min={0}
-            max={50}
-          />
+          <RuneStagger index={2}>
+            <RuneSection title="Trait Tree">
+              <Note tone="warn">
+                These change your save permanently. Make a manual save first - there is no undo.
+              </Note>
+              <ButtonRow>
+                <DWButton
+                  label="Unlock All Traits"
+                  disabled={busy}
+                  onClick={() => runAction("unlockAllTraits", null, "Unlock request sent to the game.")}
+                  data-clickpulse
+                  data-glow
+                />
+                <DWButton
+                  label="Reset All Traits"
+                  disabled={busy}
+                  onClick={() => runAction("resetAllTraits", null, "Reset request sent to the game.")}
+                />
+              </ButtonRow>
+              <Note>
+                Unlock All calls the game's own UnlockAllTraits (unlock + unblock + unhide every trait level).
+                Reset All calls ResetAllTraits - the game's own full respec.
+              </Note>
+            </RuneSection>
+          </RuneStagger>
 
-          <DWSlider
-            label="Skill Unlock Rate"
-            value={skills.points.unlockRate}
-            onChange={(v) => updateGameplay("skills.points.unlockRate", v)}
-            min={0}
-            max={200}
-          />
+          <RuneStagger index={3}>
+            <RuneSection title="Vampire Mutation (Corruption)">
+              <Readouts
+                items={[
+                  ["Mutation level", status?.mutationLevel],
+                  ["Mutation charges", status?.mutationCharges],
+                ]}
+              />
+              <ActionRow
+                label="Add Charges"
+                disabled={busy}
+                onClick={() => runAction("addMutationCharges", mutationDelta, "Mutation charges sent to the game.")}
+              >
+                <DWSlider label="Raw Mutation Charges" value={mutationDelta} onChange={setMutationDelta} min={1} max={100} />
+              </ActionRow>
+              <ActionRow
+                label="Remove Charges"
+                disabled={busy}
+                onClick={() => runAction("addMutationCharges", -mutationDelta, "Mutation charge removal sent to the game.")}
+              >
+                <Note>Raw charges, not levels - start small. Removing charges is not confirmed to undo an attained level.</Note>
+              </ActionRow>
+            </RuneSection>
+          </RuneStagger>
 
-          <DWToggle
-            label="Enable Hybrid Skills"
-            value={skills.points.hybridSkills}
-            onChange={(v) => updateGameplay("skills.points.hybridSkills", v)}
-          />
-
-          <DWSelect
-            label="Skill Preset"
-            value={skills.points.skillPreset}
-            onChange={(v) => updateGameplay("skills.points.skillPreset", v)}
-            options={["Balanced", "Aggressive", "Defensive", "Nightfall"]}
-          />
-        </RuneSection>
+          <RuneStagger index={4}>
+            <RuneSection title="Abilities">
+              <DWToggle
+                label="No Ability Cooldowns"
+                value={commandFlag(command, "noCooldowns")}
+                onChange={(v) => applyField("noCooldowns", v)}
+              />
+              <Readouts items={[["Cooldowns disabled in game", status?.cooldownsDisabled === "1" ? "Yes" : "No"]]} />
+              <DWToggle
+                label="Keep Activation Charges Full"
+                value={commandFlag(command, "keepActionSlotsCharged")}
+                onChange={(v) => applyField("keepActionSlotsCharged", v)}
+              />
+              <Note>
+                Refills your unlocked ability activation-charge slots every second (uses the capacity you've actually
+                unlocked, it doesn't add slots).
+              </Note>
+            </RuneSection>
+          </RuneStagger>
+        </BridgePanel>
       </RuneStagger>
-
-      <RuneStagger index={1}>
-        <RuneSection title="Combat Skill Attributes">
-          <DWSlider
-            label="Magic Power"
-            value={skills.attributes.magicPower}
-            onChange={(v) => updateGameplay("skills.attributes.magicPower", v)}
-            min={0}
-            max={200}
-          />
-
-          <DWSlider
-            label="Weapon Mastery"
-            value={skills.attributes.weaponMastery}
-            onChange={(v) => updateGameplay("skills.attributes.weaponMastery", v)}
-            min={0}
-            max={200}
-          />
-
-          <DWSlider
-            label="Stealth Rating"
-            value={skills.attributes.stealthRating}
-            onChange={(v) => updateGameplay("skills.attributes.stealthRating", v)}
-            min={0}
-            max={200}
-          />
-        </RuneSection>
-      </RuneStagger>
-
-      <div style={{ marginTop: 18, display: "flex", gap: 12 }}>
-        <DWButton label="Save Preset" onClick={handleSave} data-clickpulse data-glow />
-        <DWButton label="Reset to Defaults" onClick={handleReset} />
-      </div>
     </div>
   );
 }

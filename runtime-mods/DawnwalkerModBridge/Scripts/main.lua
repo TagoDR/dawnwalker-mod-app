@@ -16,6 +16,25 @@
 --   /Script/DogwoodStats.CharacterBaseAttributeSet:Health / MaxHealth (FGameplayAttributeData
 --     struct properties with CurrentValue/BaseValue floats) via
 --     AbilitySystemComponent:GetAttributeSet(AttributeSetClass)
+--   /Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:AddQuestXP(RewardAmount enum 1-5)
+--     / GetTraitPointAmount() / ReceiveTraitPoints(Value) / SetTraitPointsAmount(Value)
+--     / UnlockAllTraits(bUnlock, bUnblock, bUnhide, bUnblockNextLevelOnly) / ResetAllTraits()
+--     / AddMutationCharges(ChargeValue) / GetCurrentMutationCharges() / GetCurrentMutationLevel()
+--   /Script/DogwoodSystem.TimeSystemImpl:SetTime(Hour, Minute, Second, bAbsoluteTime) / GetCurrentDay()
+--     / GetMainGoalDay() / GetCurrentDayTimeAsFloat()
+--   /Script/DogwoodInventory.InventoryComponent:AddCurrency(Currency enum, Quantity) / GetCurrencyAmount(Type)
+--     / WeightLimit (FloatProperty) / GetWeightLimit() / GetCurrentWeight()
+--   /Script/DogwoodCombat.CombatSubsystem:SetActionDifficulty(enum) / SetRPGDifficulty(enum)
+--     / GetActionDifficultyLevel() / GetAllAggressiveNPCActors() / GetAggressiveNpcCount() / GetIsInCombat()
+--   /Script/DogwoodCombat.CombatComponentBase:GetTargetedEnemy() / Kill()
+--   /Script/DogwoodStats.BloodBarComponent:SetBloodPercent(InBloodPercent) / LockBlood() / UnlockBlood()
+--     / HealAndReplenishAllSegments()
+--   /Script/DogwoodInventory.CraftingSubsystem:UnlockAllCraftingRecipes() / AddIngredientsForAllCraftingRecipes(N)
+--   /Script/DogwoodFocus.FocusAbilitiesSubsystem:ToggleDisablingAllCooldowns_Debug() / AreCooldownsEnabled_Debug()
+--   /Script/DogwoodMap.OpenWorldJournalInterface:RevealAllMappins (called via UFunction(context) on OpenWorldJournalImpl)
+--   /Script/DogwoodMap.MappinSystemBlueprintLibrary:DebugUnlockAllFastTravelDestinations(OpenWorldJournal)
+--   /Script/Engine.CheatManager:Fly() / Ghost() / Walk() / Teleport() / DamageTarget(DamageAmount)
+--   /Script/DogwoodStats.PlayerAttributeSet:ChargedActionSlots / UnlockedActionSlots (GAS attributes)
 
 local UEHelpers = require("UEHelpers")
 
@@ -25,8 +44,6 @@ local STATUS_PATH = "Mods/DawnwalkerModBridge/status.txt"
 local LastRequestId = nil
 local LastNukeRequestId = nil
 local LastNukeTargetResult = nil
-local PendingGiveBestGear = false
-local LastGiveBestGearResult = nil
 local WasCombatFound = false
 local ReportedLockHealthError = false
 local ReportedUnlockHealthError = false
@@ -55,6 +72,68 @@ local DirectHealthDiagLogCount = 0
 local LastRawHealth = "unknown"
 local LastRawMaxHealth = "unknown"
 local LastDirectHealthWriteOk = 0
+
+-- One-shot actions (actionId nonce + action name + optional actionArg). The nonce only marks a
+-- request as noticed; execution is retried each tick until preconditions are met or it times out,
+-- so a click that lands during a post-respawn settle window is never silently dropped.
+local LastActionId = nil
+local PendingAction = nil
+local LastActionResult = nil
+local ACTION_TIMEOUT_TICKS = 15
+
+-- Boot handshake: command.txt outlives both the game and the app, so nothing in it is trusted
+-- until the app echoes this boot's id back (`bootId=` line). Every game launch therefore starts
+-- at the game's own defaults, and a stale one-shot request can never replay on relaunch.
+local BootId = (function()
+    local ok, now = pcall(os.time)
+    return string.format("%s-%d", (ok and now) and tostring(now) or "0", math.random(100000, 999999))
+end)()
+-- Shared between the 1s and 100ms loops so the fast loop also stands down mid-cutscene.
+local CutsceneActive = false
+-- The app rewrites command.txt with a fresh `heartbeat=` every few seconds and writes
+-- `appClosed=1` on quit; without either for APP_TIMEOUT_TICKS the app is gone (closed, crashed
+-- or force-killed) and every setting is released so the game returns to its defaults.
+local AppConnected = false
+local LastHeartbeat = nil
+local TicksSinceHeartbeat = 0
+local APP_TIMEOUT_TICKS = 20
+
+local function RefreshAppConnection(command)
+    if command.appClosed == "1" then
+        AppConnected = false
+        LastHeartbeat = nil
+        return
+    end
+    if command.heartbeat ~= nil and command.heartbeat ~= LastHeartbeat then
+        LastHeartbeat = command.heartbeat
+        TicksSinceHeartbeat = 0
+        AppConnected = true
+        return
+    end
+    TicksSinceHeartbeat = TicksSinceHeartbeat + 1
+    if TicksSinceHeartbeat >= APP_TIMEOUT_TICKS then AppConnected = false end
+end
+
+local function IsHandshaken(command)
+    return command ~= nil and command.bootId == BootId
+end
+
+-- Persistent toggles/values added alongside the original health/stamina/movement set.
+local WasBloodLocked = false
+local ReportedLockBloodError = false
+local ReportedUnlockBloodError = false
+local LastAppliedActionDifficulty = nil
+local OriginalActionDifficulty = nil
+local LastAppliedRPGDifficulty = nil
+local LastAppliedMovementMode = nil
+local LastAppliedGameSpeed = nil
+local OriginalLevelCap = nil
+local CooldownsDisabledByUs = false
+local ReportedMovementModeError = false
+local ReportedCooldownToggleError = false
+local PlayerAttributeSetClass = nil
+local ReportedActionSlotsWriteError = false
+local ReportedCarryWeightError = false
 
 local function ReadCommandFile()
     local file = io.open(COMMAND_PATH, "r")
@@ -169,154 +248,13 @@ local function GetPlayerMovementComponent(player)
     return FindOwnedComponent("CharacterMovementComponent", player)
 end
 
--- Same pattern again: the player's InventoryComponent (add/equip items lives here).
+-- Same pattern again: the player's InventoryComponent (currency, carry weight).
+-- NOTE: granting specific items is NOT done from Lua - FItemHandle has zero reflected properties,
+-- so UE4SS Lua can't round-trip it (every grant landed a placeholder "Bee Smoker" item). Item
+-- granting lives in the native DawnwalkerNativeFix C++ mod instead.
 local function GetPlayerInventoryComponent(player)
     if not player or not SafeIsValid(player) then return nil end
     return FindOwnedComponent("InventoryComponent", player)
-end
-
--- Best-in-game picks (found via a one-time item-catalog scan, see repo memory for the full
--- rarity/damage/toughness table): rarity=6 "Masterpiece/Unique" tier, highest damage/toughness
--- within that tier. One weapon per type/style so the player has a real choice, but only the
--- single highest-damage one auto-equips; all four armor slots equip
--- since they don't conflict. Jewelry (rings/amulets) carries no comparable damage/toughness stat
--- (likely special-effect items instead), so all rarity=6 ones are granted for the player to pick.
-local BEST_GEAR_WEAPONS = {
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordBlacksmithMasterpice2a.ITM_Weapon_SwordBlacksmithMasterpice2a", equip = false },
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordErkas1a.ITM_Weapon_SwordErkas1a", equip = false },
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordDawnwalker5a.ITM_Weapon_SwordDawnwalker5a", equip = true },
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_MaceMaster1a.ITM_Weapon_MaceMaster1a", equip = false },
-}
-local BEST_GEAR_ARMOR = {
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_ChestUniqueAncient1a.ITM_Clothing_ChestUniqueAncient1a", equip = true },
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_LegsUniqueAncient1a.ITM_Clothing_LegsUniqueAncient1a", equip = true },
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_HandsUniqueDawnwalker2a.ITM_Clothing_HandsUniqueDawnwalker2a", equip = true },
-    { path = "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_FeetUniqueDawnwalker2a.ITM_Clothing_FeetUniqueDawnwalker2a", equip = true },
-}
-local BEST_GEAR_JEWELRY = {
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing1.ITM_Clothing_NewUniqueRing1",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing2.ITM_Clothing_NewUniqueRing2",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing3.ITM_Clothing_NewUniqueRing3",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing4.ITM_Clothing_NewUniqueRing4",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueRing5.ITM_Clothing_NewUniqueRing5",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_VampiricRing.ITM_Clothing_VampiricRing",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_BakirRing.ITM_Clothing_BakirRing",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_DawnwalkersRing.ITM_Clothing_DawnwalkersRing",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_AstrologistsRing.ITM_Clothing_AstrologistsRing",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet1.ITM_Clothing_NewUniqueAmulet1",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet2.ITM_Clothing_NewUniqueAmulet2",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet3.ITM_Clothing_NewUniqueAmulet3",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet4.ITM_Clothing_NewUniqueAmulet4",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_NewUniqueAmulet5.ITM_Clothing_NewUniqueAmulet5",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_MatriarchsAmulet.ITM_Clothing_MatriarchsAmulet",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_VampiricAmulet.ITM_Clothing_VampiricAmulet",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_DawnwalkersAmulet.ITM_Clothing_DawnwalkersAmulet",
-    "/Game/_Dawnwalker/Inventory/Items/ITM_Clothing_VichosCross.ITM_Clothing_VichosCross",
-}
-
--- GetItemHandle is a BlueprintFunctionLibrary function - called on the class's CDO
--- (the "Default__ClassName" convention), same as any other UFunction call in UE4SS Lua.
-local function GetInventoryFunctionLibrary()
-    local ok, lib = pcall(function()
-        return StaticFindObject("/Script/DogwoodInventory.Default__InventoryBlueprintFunctionLibrary")
-    end)
-    if ok and lib and SafeIsValid(lib) then return lib end
-    return nil
-end
-
-local function GiveBestGear(player, itemLevel)
-    if not player or not SafeIsValid(player) then return "no player" end
-    local inv = GetPlayerInventoryComponent(player)
-    if not inv or not SafeIsValid(inv) then return "no inventory component" end
-    local lib = GetInventoryFunctionLibrary()
-    if not lib then return "no function library" end
-
-    local granted, failed = 0, 0
-    local function grantOne(path, equip)
-        local assetOk, asset = pcall(function() return StaticFindObject(path) end)
-        if not assetOk or not asset or not SafeIsValid(asset) then
-            failed = failed + 1
-            return
-        end
-        local handleOk, handle = pcall(function() return lib:GetItemHandle(player, asset, itemLevel) end)
-        if not handleOk or not handle then
-            failed = failed + 1
-            return
-        end
-        local addOk = pcall(function()
-            if equip then
-                inv:TryAddAndEquipItem(handle, false)
-            else
-                inv:TryAddItem(handle, 1, false)
-            end
-        end)
-        if addOk then granted = granted + 1 else failed = failed + 1 end
-    end
-
-    for _, w in ipairs(BEST_GEAR_WEAPONS) do grantOne(w.path, w.equip) end
-    for _, a in ipairs(BEST_GEAR_ARMOR) do grantOne(a.path, a.equip) end
-    for _, j in ipairs(BEST_GEAR_JEWELRY) do grantOne(j, false) end
-
-    return string.format("granted=%d failed=%d", granted, failed)
-end
-
--- DIAGNOSTIC (2026-09-04): GiveBestGear reports granted=N failed=0 but the item that actually
--- lands in the inventory is always wrong ("Bee Smoker" quest item) - the ItemHandle struct
--- returned by GetItemHandle is suspected to be garbage/zeroed. Its own fields aren't listed
--- anywhere in the static UE4SS_ObjectDump.txt under the expected "DogwoodInventory.ItemHandle:"
--- path, so dump them live via reflection (UScriptStruct supports ForEachProperty same as
--- UClass) plus the actual field values of one freshly-created test handle, read-only (no
--- TryAddItem/TryAddAndEquipItem call here - this cannot grant/pollute anything).
-local DumpedItemHandleFields = false
-local function DumpItemHandleDiagnosticsOnce(player)
-    if DumpedItemHandleFields then return end
-    if not player or not SafeIsValid(player) then return end
-    local lib = GetInventoryFunctionLibrary()
-    if not lib then return end
-    DumpedItemHandleFields = true
-
-    local structOk, struct = pcall(function() return StaticFindObject("/Script/DogwoodInventory.ItemHandle") end)
-    if structOk and struct and SafeIsValid(struct) then
-        local propOk, propErr = pcall(function()
-            struct:ForEachProperty(function(prop)
-                local nameOk, name = pcall(function() return prop:GetFName():ToString() end)
-                local typeOk, ptype = pcall(function() return prop:GetClass():GetFName():ToString() end)
-                print(string.format("[DawnwalkerModBridge] ItemHandle field: %s (%s)",
-                    nameOk and name or "?", tostring(typeOk and ptype or "?")))
-            end)
-        end)
-        if not propOk then
-            print("[DawnwalkerModBridge] ItemHandle field dump failed: " .. tostring(propErr))
-        end
-    else
-        print("[DawnwalkerModBridge] ItemHandle struct lookup failed")
-    end
-
-    -- Build one real handle for a known-good test item and log its resulting field values.
-    local testPath = "/Game/_Dawnwalker/Inventory/Items/ITM_Weapon_SwordDawnwalker5a.ITM_Weapon_SwordDawnwalker5a"
-    local assetOk, asset = pcall(function() return StaticFindObject(testPath) end)
-    if assetOk and asset and SafeIsValid(asset) then
-        local handleOk, handle = pcall(function() return lib:GetItemHandle(player, asset, 1) end)
-        if handleOk and handle then
-            print("[DawnwalkerModBridge] Test handle created for " .. testPath .. ", dumping field values:")
-            if structOk and struct and SafeIsValid(struct) then
-                pcall(function()
-                    struct:ForEachProperty(function(prop)
-                        local nameOk, name = pcall(function() return prop:GetFName():ToString() end)
-                        if nameOk then
-                            local valOk, val = pcall(function() return handle[name] end)
-                            print(string.format("[DawnwalkerModBridge] Test handle field %s = %s",
-                                name, tostring(valOk and val or "?")))
-                        end
-                    end)
-                end)
-            end
-        else
-            print("[DawnwalkerModBridge] Test handle creation failed: " .. tostring(handle))
-        end
-    else
-        print("[DawnwalkerModBridge] Test item asset lookup failed for " .. testPath)
-    end
 end
 
 local function GetCameraManager()
@@ -325,6 +263,257 @@ end
 
 local function GetCheatManager()
     return FindFirstOf("CheatManager")
+end
+
+-- Game-instance-level singletons (one live instance each, same FindFirstOf pattern as the
+-- character development subsystem). BloodBarComponent lives on the PlayerState, which only the
+-- local player has in single-player, so FindFirstOf is unambiguous for it too.
+local function GetTimeSystem()
+    return FindFirstOf("TimeSystemImpl")
+end
+
+local function GetCombatSubsystem()
+    return FindFirstOf("CombatSubsystem")
+end
+
+local function GetCraftingSubsystem()
+    return FindFirstOf("CraftingSubsystem")
+end
+
+local function GetFocusAbilitiesSubsystem()
+    return FindFirstOf("FocusAbilitiesSubsystem")
+end
+
+local function GetBloodBarComponent()
+    return FindFirstOf("BloodBarComponent")
+end
+
+local function GetOpenWorldJournal()
+    return FindFirstOf("OpenWorldJournalImpl")
+end
+
+local function GetCinematicSubsystem()
+    return FindFirstOf("CinematicSubsystem")
+end
+
+local function FindValid(getter)
+    local ok, object = pcall(getter)
+    if ok and object and SafeIsValid(object) then return object end
+    return nil
+end
+
+-- Cutscenes and dialogues swap/tear down actors (cinematic characters, cameras) under the mod's
+-- feet; a crash mid-cutscene with only game frames on the stack pointed at our per-tick writes
+-- landing on objects being destroyed. Both loops go fully quiet while any of these report true.
+local function IsCutsceneActive(player)
+    local cinematic = FindValid(GetCinematicSubsystem)
+    if cinematic then
+        local ok, active = pcall(function() return cinematic:IsDialogueActive() end)
+        if ok and active == true then return true end
+        if player then
+            local inOk, inCutscene = pcall(function() return cinematic:IsCharacterInCinematicDialogueOrCutscene(player) end)
+            if inOk and inCutscene == true then return true end
+        end
+    end
+    local focus = FindValid(GetFocusAbilitiesSubsystem)
+    if focus then
+        local ok, mode = pcall(function() return focus:GetIsInFocusAbilityCinematicMode() end)
+        if ok and mode == true then return true end
+    end
+    return false
+end
+
+-- Keeps the player's ability activation charges (PlayerAttributeSet ChargedActionSlots) topped up
+-- to their unlocked capacity - same raw GAS struct write technique as ForceDirectHealthAttribute,
+-- so it must only ever run behind the same settle/IsAlive gates.
+local function ForceActionSlotsCharged(player)
+    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
+    if not ascOk or not asc or not SafeIsValid(asc) then return false end
+    if not PlayerAttributeSetClass or not SafeIsValid(PlayerAttributeSetClass) then
+        local classOk, class = pcall(function()
+            return StaticFindObject("/Script/DogwoodStats.PlayerAttributeSet")
+        end)
+        if classOk and class then PlayerAttributeSetClass = class end
+    end
+    if not PlayerAttributeSetClass then return false end
+    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(PlayerAttributeSetClass) end)
+    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return false end
+    local readOk, unlocked = pcall(function() return attrSet.UnlockedActionSlots.CurrentValue end)
+    if not readOk or not unlocked or unlocked <= 0 then return false end
+    -- Touch the struct as little as possible: only the live value, and only when it has dropped.
+    local curOk, charged = pcall(function() return attrSet.ChargedActionSlots.CurrentValue end)
+    if curOk and charged and charged >= unlocked then return true end
+    local writeOk, writeErr = pcall(function()
+        attrSet.ChargedActionSlots.CurrentValue = unlocked
+    end)
+    if not writeOk and not ReportedActionSlotsWriteError then
+        print("[DawnwalkerModBridge] ChargedActionSlots write failed: " .. tostring(writeErr))
+        ReportedActionSlotsWriteError = true
+    end
+    return writeOk
+end
+
+-- Kills every combat component whose owner address is in `ownerAddresses`, using ONE FindAllOf
+-- scan for all of them (rather than one scan per actor). Returns the number killed.
+local function KillCombatComponentsOwnedBy(ownerAddresses, skipAddress)
+    local componentsOk, components = pcall(FindAllOf, "CombatComponentBase")
+    if not componentsOk or not components then return 0 end
+    local killed = 0
+    for _, component in ipairs(components) do
+        if SafeIsValid(component) then
+            local ownerOk, owner = pcall(function() return component:GetOwner() end)
+            if ownerOk and owner and SafeIsValid(owner) then
+                local addrOk, addr = pcall(function() return owner:GetAddress() end)
+                if addrOk and addr ~= skipAddress and ownerAddresses[addr] then
+                    local aliveOk, alive = pcall(function() return component:IsAlive() end)
+                    if not (aliveOk and alive == false) then
+                        if pcall(function() component:Kill() end) then killed = killed + 1 end
+                    end
+                end
+            end
+        end
+    end
+    return killed
+end
+
+-- Executes one one-shot action. Returns (done, result): done=false means a precondition (an
+-- object not resolvable yet / pawn still settling) wasn't met and the caller should retry next
+-- tick; done=true means the action is finished (successfully or not) and must not run again.
+local function RunAction(name, arg, ctx)
+    -- Nothing runs until the player pawn exists: game-instance subsystems are alive on the main
+    -- menu/loading screen, but calling into them there is what froze the game on the load screen.
+    if not ctx.player then return false, "waiting for the player to load in" end
+    local n = tonumber(arg)
+    if name == "grantXP" then
+        if not ctx.subsystem then return false, "waiting for character development subsystem" end
+        if not n or n < 1 or n > 5 then return true, "failed: reward tier out of range" end
+        local ok, amount = pcall(function() return ctx.subsystem:AddQuestXP(math.floor(n)) end)
+        if not ok then return true, "failed: " .. tostring(amount) end
+        return true, string.format("ok: granted %s XP", tostring(amount))
+    elseif name == "addTraitPoints" then
+        if not ctx.subsystem then return false, "waiting for character development subsystem" end
+        if not n or n < -999 or n > 999 or n == 0 then return true, "failed: amount out of range" end
+        local ok, err = pcall(function() ctx.subsystem:ReceiveTraitPoints(math.floor(n)) end)
+        return true, ok and string.format("ok: %+d trait points", math.floor(n)) or ("failed: " .. tostring(err))
+    elseif name == "setTraitPoints" then
+        if not ctx.subsystem then return false, "waiting for character development subsystem" end
+        if not n or n < 0 or n > 999 then return true, "failed: amount out of range" end
+        local ok, err = pcall(function() ctx.subsystem:SetTraitPointsAmount(math.floor(n)) end)
+        return true, ok and string.format("ok: trait points set to %d", math.floor(n)) or ("failed: " .. tostring(err))
+    elseif name == "unlockAllTraits" then
+        if not ctx.subsystem then return false, "waiting for character development subsystem" end
+        local ok, err = pcall(function() ctx.subsystem:UnlockAllTraits(true, true, true, false) end)
+        return true, ok and "ok: all traits unlocked" or ("failed: " .. tostring(err))
+    elseif name == "resetAllTraits" then
+        if not ctx.subsystem then return false, "waiting for character development subsystem" end
+        local ok, err = pcall(function() ctx.subsystem:ResetAllTraits() end)
+        return true, ok and "ok: all traits reset" or ("failed: " .. tostring(err))
+    elseif name == "addMutationCharges" then
+        if not ctx.subsystem then return false, "waiting for character development subsystem" end
+        if not n or n < -999 or n > 999 or n == 0 then return true, "failed: amount out of range" end
+        local ok, err = pcall(function() ctx.subsystem:AddMutationCharges(math.floor(n)) end)
+        return true, ok and string.format("ok: %+d mutation charges", math.floor(n)) or ("failed: " .. tostring(err))
+    elseif name == "addCoins" then
+        if not n or n < -999999 or n > 999999 or n == 0 then return true, "failed: amount out of range" end
+        if ctx.movementSettling or not ctx.player then return false, "waiting for player to settle" end
+        local inv = GetPlayerInventoryComponent(ctx.player)
+        if not inv then return false, "waiting for inventory component" end
+        local ok, err = pcall(function() inv:AddCurrency(0, math.floor(n)) end)
+        return true, ok and string.format("ok: %+d coins", math.floor(n)) or ("failed: " .. tostring(err))
+    elseif name == "unlockAllRecipes" then
+        local crafting = FindValid(GetCraftingSubsystem)
+        if not crafting then return false, "waiting for crafting subsystem" end
+        local ok, err = pcall(function() crafting:UnlockAllCraftingRecipes() end)
+        return true, ok and "ok: all crafting recipes unlocked" or ("failed: " .. tostring(err))
+    elseif name == "addAllIngredients" then
+        local crafting = FindValid(GetCraftingSubsystem)
+        if not crafting then return false, "waiting for crafting subsystem" end
+        if not n or n < 1 or n > 10 then return true, "failed: amount out of range" end
+        local ok, err = pcall(function() crafting:AddIngredientsForAllCraftingRecipes(math.floor(n)) end)
+        return true, ok and string.format("ok: ingredients for %dx every recipe added", math.floor(n)) or ("failed: " .. tostring(err))
+    elseif name == "unlockAllFastTravel" then
+        local journal = FindValid(GetOpenWorldJournal)
+        if not journal then return false, "waiting for open world journal" end
+        local libOk, lib = pcall(function()
+            return StaticFindObject("/Script/DogwoodMap.Default__MappinSystemBlueprintLibrary")
+        end)
+        if not libOk or not lib or not SafeIsValid(lib) then return true, "failed: mappin library not found" end
+        local ok, err = pcall(function() lib:DebugUnlockAllFastTravelDestinations(journal) end)
+        return true, ok and "ok: all fast travel destinations unlocked" or ("failed: " .. tostring(err))
+    elseif name == "revealAllMappins" then
+        local journal = FindValid(GetOpenWorldJournal)
+        if not journal then return false, "waiting for open world journal" end
+        -- Interface function: not reachable via journal:RevealAllMappins(), so resolve the UFunction
+        -- itself and call it with the journal as explicit context (UFunction.__call convention).
+        local fnOk, fn = pcall(function()
+            return StaticFindObject("/Script/DogwoodMap.OpenWorldJournalInterface:RevealAllMappins")
+        end)
+        if not fnOk or not fn or not SafeIsValid(fn) then return true, "failed: RevealAllMappins not found" end
+        local ok, err = pcall(function() fn(journal) end)
+        return true, ok and "ok: all map pins revealed" or ("failed: " .. tostring(err))
+    elseif name == "killTarget" then
+        if ctx.combatSettling or ctx.componentSettling or not ctx.combat then return false, "waiting for combat component" end
+        local targetOk, target = pcall(function() return ctx.combat:GetTargetedEnemy() end)
+        if not targetOk then return true, "failed: " .. tostring(target) end
+        if not target or not SafeIsValid(target) then return true, "failed: no enemy targeted (lock on first)" end
+        local addrOk, addr = pcall(function() return target:GetAddress() end)
+        if not addrOk then return true, "failed: could not resolve target" end
+        local killed = KillCombatComponentsOwnedBy({ [addr] = true }, nil)
+        return true, killed > 0 and "ok: target killed" or "failed: target has no combat component"
+    elseif name == "killAllAggressive" then
+        if ctx.combatSettling or not ctx.player then return false, "waiting for player to settle" end
+        local combatSubsystem = FindValid(GetCombatSubsystem)
+        if not combatSubsystem then return false, "waiting for combat subsystem" end
+        local actorsOk, actors = pcall(function() return combatSubsystem:GetAllAggressiveNPCActors() end)
+        if not actorsOk then return true, "failed: " .. tostring(actors) end
+        if type(actors) ~= "table" then return true, "ok: no aggressive enemies" end
+        local addresses = {}
+        local count = 0
+        for _, param in ipairs(actors) do
+            -- TArray elements arrive as RemoteUnrealParam wrappers (:get() yields the actor); fall
+            -- back to treating the element as the actor itself if this UE4SS build differs.
+            local getOk, actor = pcall(function() return param:get() end)
+            if not getOk or not actor then actor = param end
+            if actor and SafeIsValid(actor) then
+                local addrOk, addr = pcall(function() return actor:GetAddress() end)
+                if addrOk then
+                    addresses[addr] = true
+                    count = count + 1
+                end
+            end
+        end
+        if count == 0 then return true, "ok: no aggressive enemies" end
+        local playerAddrOk, playerAddr = pcall(function() return ctx.player:GetAddress() end)
+        local killed = KillCombatComponentsOwnedBy(addresses, playerAddrOk and playerAddr or nil)
+        return true, string.format("ok: killed %d of %d aggressive enemies", killed, count)
+    elseif name == "teleport" then
+        if ctx.movementSettling or not ctx.cheatManager then return false, "waiting for cheat manager" end
+        local ok, err = pcall(function() ctx.cheatManager:Teleport() end)
+        return true, ok and "ok: teleported to aim point" or ("failed: " .. tostring(err))
+    elseif name == "setTimeOfDay" then
+        local timeSystem = FindValid(GetTimeSystem)
+        if not timeSystem then return false, "waiting for time system" end
+        local hour, minute = tostring(arg or ""):match("^(%d+):(%d+)$")
+        hour, minute = tonumber(hour), tonumber(minute)
+        if not hour or not minute or hour < 0 or hour > 23 or minute < 0 or minute > 59 then
+            return true, "failed: time must be HH:MM"
+        end
+        local ok, err = pcall(function() timeSystem:SetTime(hour, minute, 0, true) end)
+        return true, ok and string.format("ok: time set to %02d:%02d", hour, minute) or ("failed: " .. tostring(err))
+    elseif name == "refillBlood" then
+        local bloodBar = FindValid(GetBloodBarComponent)
+        if not bloodBar then return false, "waiting for blood bar component" end
+        local ok, err = pcall(function() bloodBar:HealAndReplenishAllSegments() end)
+        return true, ok and "ok: blood replenished" or ("failed: " .. tostring(err))
+    elseif name == "healNow" then
+        if ctx.combatSettling or ctx.componentSettling or not ctx.combat then return false, "waiting for combat component" end
+        local ok, err = pcall(function()
+            ctx.combat:SetHealthPercent(1.0)
+            ctx.combat:SetStaminaPercent(1.0)
+        end)
+        return true, ok and "ok: health and stamina restored" or ("failed: " .. tostring(err))
+    end
+    return true, "failed: unknown action '" .. tostring(name) .. "'"
 end
 
 -- Multiplier-based features need the game's original value, captured once, so repeated
@@ -337,6 +526,19 @@ local function GetBaseValue(cacheKey, object, propertyName)
         BaseValues[cacheKey] = value
     end
     return BaseValues[cacheKey]
+end
+
+-- Multiplier fields that were removed from command.txt (reset to defaults / preset without them)
+-- must put the original value back: an absent field reads as 1x once we've ever cached a base.
+local function ReadMultiplier(command, key, cacheKey, min, max)
+    local raw = command[key]
+    if raw == nil then
+        if BaseValues[cacheKey] ~= nil then return 1 end
+        return nil
+    end
+    local mult = tonumber(raw)
+    if mult and mult >= min and mult <= max then return mult end
+    return nil, "out_of_range"
 end
 
 -- A crash was observed writing to the pawn's components within ~200ms of a respawn
@@ -376,7 +578,9 @@ local function RefreshPawnSettleState()
         -- (a native access violation pcall can't catch) - give it several full ticks, not one.
         CombatSettleTicksRemaining = 3
         MovementSettleTicksRemaining = 6
-        BaseValues = {}
+        -- Per-pawn bases go stale with the old pawn; the camera manager survives a respawn, so
+        -- its base must not be re-read from an already-multiplied FOV.
+        BaseValues = { fov = BaseValues.fov }
         -- The old Source pawn for AddPlayerInvulnerability is now destroyed; force a fresh
         -- Add call against the new pawn rather than assuming the grant carried over.
         WasHealthInvulnerable = false
@@ -389,6 +593,11 @@ local function RefreshPawnSettleState()
         -- New pawn means a fresh attribute set at its real default - force a re-apply rather than
         -- assuming the old pawn's value (or lack of one) still matches.
         LastAppliedDamageMultiplier = nil
+        -- Per-pawn state for the newer toggles: the movement mode (Fly/Ghost/Walk) is pawn
+        -- state, the blood lock and RPG difficulty may be reset by the game on level load.
+        LastAppliedMovementMode = nil
+        LastAppliedRPGDifficulty = nil
+        WasBloodLocked = false
     else
         if CombatSettleTicksRemaining > 0 then
             CombatSettleTicksRemaining = CombatSettleTicksRemaining - 1
@@ -526,15 +735,13 @@ local function ApplyCommand()
     local player = RefreshPawnSettleState()
     local combatSettling = CombatSettleTicksRemaining > 0
     local movementSettling = MovementSettleTicksRemaining > 0
-
-    -- ItemHandle diagnostic isn't tied to a specific pawn, but still wait for the settle window
-    -- since it does create a real handle via the inventory function library.
-    if not combatSettling and not movementSettling then
-        pcall(function() DumpItemHandleDiagnosticsOnce(player) end)
-    end
+    -- Game-instance subsystems exist on the loading screen/main menu long before the world does;
+    -- writing to them there froze the game on the load screen once. Anything that isn't one of
+    -- the original always-on singleton writes waits for the player pawn.
+    local inWorld = player ~= nil and SafeIsValid(player)
 
     local command = ReadCommandFile()
-    local status = { bridgeLoaded = 1, ok = 0 }
+    local status = { bridgeLoaded = 1, ok = 0, bootId = BootId }
 
     if not command then
         status.commandFileFound = 0
@@ -543,6 +750,43 @@ local function ApplyCommand()
     end
     status.commandFileFound = 1
 
+    -- Until the app acknowledges THIS boot, the file is a leftover from a previous session:
+    -- apply nothing (the game stays at its defaults) and just advertise our bootId.
+    if not IsHandshaken(command) then
+        status.awaitingHandshake = 1
+        status.ok = 1
+        WriteStatusFile(status)
+        return
+    end
+
+    RefreshAppConnection(command)
+    status.appConnected = AppConnected and 1 or 0
+    if not AppConnected then
+        -- App gone: every field reads as absent, which the per-feature code below treats as
+        -- "restore the game's own value" (unlock health/stamina/blood, 1x multipliers, Walk...).
+        command = { bootId = command.bootId }
+    end
+
+    -- Hands off during cutscenes/dialogues (see IsCutsceneActive). Persistent settings resume on
+    -- the first tick afterwards; pending one-shot actions keep waiting rather than being dropped.
+    if inWorld and IsCutsceneActive(player) then
+        CutsceneActive = true
+        status.cutsceneActive = 1
+        status.ok = 1
+        status.actionResult = PendingAction and "pending: waiting for cutscene to end" or LastActionResult
+        WriteStatusFile(status)
+        return
+    end
+    if CutsceneActive then
+        -- Actors were swapped/torn down during the cutscene: treat the way out like a respawn.
+        CutsceneActive = false
+        CombatSettleTicksRemaining = math.max(CombatSettleTicksRemaining, 3)
+        MovementSettleTicksRemaining = math.max(MovementSettleTicksRemaining, 3)
+        combatSettling = true
+        movementSettling = true
+    end
+    status.cutsceneActive = 0
+
     local settings = GetSettings()
     if settings and SafeIsValid(settings) then
         status.settingsFound = 1
@@ -550,12 +794,19 @@ local function ApplyCommand()
             local cap = tonumber(command.levelCap)
             -- Same table-bounds risk as setLevel; keep the cap within what the level tables actually cover.
             if cap and cap >= 1 and cap <= 99 then
+                if OriginalLevelCap == nil then
+                    local origOk, orig = pcall(function() return settings.LevelCap end)
+                    if origOk and type(orig) == "number" then OriginalLevelCap = orig end
+                end
                 local applied = pcall(function() settings.LevelCap = math.floor(cap) end)
                 status.levelCapApplied = applied and 1 or 0
             else
                 status.levelCapApplied = 0
                 status.levelCapRejected = "out_of_range"
             end
+        elseif OriginalLevelCap ~= nil then
+            -- Field removed (reset/preset): put the game's own cap back, then stop tracking it.
+            if pcall(function() settings.LevelCap = OriginalLevelCap end) then OriginalLevelCap = nil end
         end
         local capOk, capValue = pcall(function() return settings.LevelCap end)
         status.levelCap = capOk and capValue or "unknown"
@@ -581,34 +832,22 @@ local function ApplyCommand()
                     status.setLevelRejected = "out_of_range"
                 end
             end
-            if command.giveBestGear == "1" then
-                -- DISABLED (2026-09-04): GetItemHandle is confirmed to produce a broken handle -
-                -- every grant call reports success but the wrong item (a "Bee Smoker" quest item)
-                -- actually lands in the inventory, flooding it. Do NOT re-enable
-                -- (set PendingGiveBestGear = true here) until DumpItemHandleDiagnosticsOnce's
-                -- output below has been reviewed and the real cause fixed.
-                LastGiveBestGearResult = "disabled: wrong-item bug not yet fixed - see repo memory"
-            end
         end
-
-        if PendingGiveBestGear then
-            if combatSettling or movementSettling then
-                LastGiveBestGearResult = "pending: waiting for pawn to settle"
-            else
-                local levelOk, curLevel = pcall(function() return subsystem:GetCurrentLevel() end)
-                local itemLevel = (levelOk and tonumber(curLevel)) or 1
-                local resultOk, result = pcall(function() return GiveBestGear(player, math.floor(itemLevel)) end)
-                LastGiveBestGearResult = resultOk and result or ("error: " .. tostring(result))
-                PendingGiveBestGear = false
-                print("[DawnwalkerModBridge] GiveBestGear: " .. tostring(LastGiveBestGearResult))
-            end
-        end
-        status.giveBestGearResult = LastGiveBestGearResult
 
         local levelOk, level = pcall(function() return subsystem:GetCurrentLevel() end)
         local xpOk, xp = pcall(function() return subsystem:GetCurrentXP() end)
         status.currentLevel = levelOk and level or "unknown"
         status.currentXP = xpOk and xp or "unknown"
+        if levelOk and type(level) == "number" then
+            local reqOk, req = pcall(function() return subsystem:GetCurrentLevelXPRequirement(level) end)
+            status.xpRequirement = reqOk and req or "unknown"
+        end
+        local tpOk, tp = pcall(function() return subsystem:GetTraitPointAmount() end)
+        status.traitPoints = tpOk and tp or "unknown"
+        local mcOk, mc = pcall(function() return subsystem:GetCurrentMutationCharges() end)
+        status.mutationCharges = mcOk and mc or "unknown"
+        local mlOk, ml = pcall(function() return subsystem:GetCurrentMutationLevel() end)
+        status.mutationLevel = mlOk and ml or "unknown"
     else
         status.subsystemFound = 0
     end
@@ -705,6 +944,10 @@ local function ApplyCommand()
     end
 
     status.combatSettling = combatSettling and 1 or 0
+    -- Exposed to the one-shot action dispatcher at the end of this tick (killTarget/healNow need
+    -- the player's combat component, resolved fresh this tick - never cached across ticks).
+    local resolvedCombat = nil
+    local resolvedComponentSettling = true
     if combatSettling then
         -- Don't even call GetPlayerCombatComponent here: FindOwnedComponent scans and calls
         -- :IsValid()/:GetOwner() on every CombatComponentBase in the world, and that scan itself
@@ -724,6 +967,8 @@ local function ApplyCommand()
             status.combatFound = 1
             local componentSettling = CombatComponentSettleTicksRemaining > 0
             status.combatComponentSettling = componentSettling and 1 or 0
+            resolvedCombat = combat
+            resolvedComponentSettling = componentSettling
             if componentSettling then
                 -- Don't touch this component at all yet: it just transitioned from not-found to
                 -- found (independent of any pawn-address change, e.g. after a loading screen or
@@ -804,6 +1049,16 @@ local function ApplyCommand()
             status.damageMultiplierLiveCurrent = liveCurrent
             status.damageMultiplierLiveBase = liveBase
             status.weaponDamageMaxLiveCurrent = ReadWeaponDamageLiveValue(player)
+            -- Keep ability activation charges full. Same raw GAS write hazard class as the
+            -- health write, so it copies the same IsAlive() death guard (fail-open on error).
+            if command.keepActionSlotsCharged == "1" then
+                local aliveOk, isAlive = pcall(function() return combat:IsAlive() end)
+                if not (aliveOk and isAlive == false) then
+                    status.actionSlotsCharged = ForceActionSlotsCharged(player) and 1 or 0
+                else
+                    status.actionSlotsCharged = 0
+                end
+            end
             status.healthLocked = (lockHealthOk == true) and 1 or 0
             status.staminaLocked = (lockStaminaOk == true) and 1 or 0
             local hpOk, hp = pcall(function() return combat:GetHealthPercentage() end)
@@ -831,29 +1086,26 @@ local function ApplyCommand()
         local movement = GetPlayerMovementComponent(player)
         if movement and SafeIsValid(movement) then
             status.movementFound = 1
-            local baseWalkSpeed = GetBaseValue("walkSpeed", movement, "MaxWalkSpeed")
-            if baseWalkSpeed and command.speedMultiplier then
-                local mult = tonumber(command.speedMultiplier)
+            -- Only start tracking a base once the user has actually asked for a multiplier.
+            local baseWalkSpeed = (command.speedMultiplier or BaseValues.walkSpeed) and GetBaseValue("walkSpeed", movement, "MaxWalkSpeed") or nil
+            local speedMult, speedErr = ReadMultiplier(command, "speedMultiplier", "walkSpeed", 0.1, 5)
+            if baseWalkSpeed and speedMult then
                 -- Keep multipliers within a sane range; extreme speed can shove the player through geometry.
-                if mult and mult >= 0.1 and mult <= 5 then
-                    local applied = pcall(function() movement.MaxWalkSpeed = baseWalkSpeed * mult end)
-                    status.speedMultiplierApplied = applied and 1 or 0
-                else
-                    status.speedMultiplierApplied = 0
-                    status.speedMultiplierRejected = "out_of_range"
-                end
+                local applied = pcall(function() movement.MaxWalkSpeed = baseWalkSpeed * speedMult end)
+                status.speedMultiplierApplied = applied and 1 or 0
+            elseif speedErr then
+                status.speedMultiplierApplied = 0
+                status.speedMultiplierRejected = speedErr
             end
 
-            local baseJumpZ = GetBaseValue("jumpZ", movement, "JumpZVelocity")
-            if baseJumpZ and command.jumpMultiplier then
-                local mult = tonumber(command.jumpMultiplier)
-                if mult and mult >= 0.1 and mult <= 5 then
-                    local applied = pcall(function() movement.JumpZVelocity = baseJumpZ * mult end)
-                    status.jumpMultiplierApplied = applied and 1 or 0
-                else
-                    status.jumpMultiplierApplied = 0
-                    status.jumpMultiplierRejected = "out_of_range"
-                end
+            local baseJumpZ = (command.jumpMultiplier or BaseValues.jumpZ) and GetBaseValue("jumpZ", movement, "JumpZVelocity") or nil
+            local jumpMult, jumpErr = ReadMultiplier(command, "jumpMultiplier", "jumpZ", 0.1, 5)
+            if baseJumpZ and jumpMult then
+                local applied = pcall(function() movement.JumpZVelocity = baseJumpZ * jumpMult end)
+                status.jumpMultiplierApplied = applied and 1 or 0
+            elseif jumpErr then
+                status.jumpMultiplierApplied = 0
+                status.jumpMultiplierRejected = jumpErr
             end
         else
             status.movementFound = 0
@@ -863,24 +1115,22 @@ local function ApplyCommand()
     local camera = GetCameraManager()
     if camera and SafeIsValid(camera) then
         status.cameraFound = 1
-        local baseFov = GetBaseValue("fov", camera, "DefaultFOV")
-        if baseFov and command.fovMultiplier then
-            local mult = tonumber(command.fovMultiplier)
+        local baseFov = (command.fovMultiplier or BaseValues.fov) and GetBaseValue("fov", camera, "DefaultFOV") or nil
+        local fovMult, fovErr = ReadMultiplier(command, "fovMultiplier", "fov", 0.1, 5)
+        if baseFov and fovMult then
             -- Clamp the resulting FOV itself (not just the multiplier): UE cameras get unstable well
             -- outside the ~10-170 degree range regardless of what multiplier produced it.
-            if mult and mult >= 0.1 and mult <= 5 then
-                local newFov = baseFov * mult
-                if newFov >= 10 and newFov <= 170 then
-                    local applied = pcall(function() camera.DefaultFOV = newFov end)
-                    status.fovMultiplierApplied = applied and 1 or 0
-                else
-                    status.fovMultiplierApplied = 0
-                    status.fovMultiplierRejected = "out_of_range"
-                end
+            local newFov = baseFov * fovMult
+            if newFov >= 10 and newFov <= 170 then
+                local applied = pcall(function() camera.DefaultFOV = newFov end)
+                status.fovMultiplierApplied = applied and 1 or 0
             else
                 status.fovMultiplierApplied = 0
                 status.fovMultiplierRejected = "out_of_range"
             end
+        elseif fovErr then
+            status.fovMultiplierApplied = 0
+            status.fovMultiplierRejected = fovErr
         end
     else
         status.cameraFound = 0
@@ -895,10 +1145,14 @@ local function ApplyCommand()
             if speed and speed >= 0.1 and speed <= 4 then
                 local applied = pcall(function() cheatManager:Slomo(speed) end)
                 status.gameSpeedApplied = applied and 1 or 0
+                if applied then LastAppliedGameSpeed = speed end
             else
                 status.gameSpeedApplied = 0
                 status.gameSpeedRejected = "out_of_range"
             end
+        elseif LastAppliedGameSpeed and LastAppliedGameSpeed ~= 1 then
+            -- Field removed (reset/preset): put time dilation back to normal once.
+            if pcall(function() cheatManager:Slomo(1.0) end) then LastAppliedGameSpeed = 1 end
         end
 
         -- REAL FIX ATTEMPT #5: native God() cheat toggle, see comment near WasNativeGodModeApplied.
@@ -945,9 +1199,239 @@ local function ApplyCommand()
             end
         end
         status.nukeTargetResult = LastNukeTargetResult
+
+        -- Stock UE movement-mode cheats. Pawn state, so re-applied after every respawn (the
+        -- LastAppliedMovementMode reset in RefreshPawnSettleState) and gated behind the movement
+        -- settle window like every other write that reaches the pawn's movement component. An
+        -- absent field means Walk (reset to defaults) once we've switched modes on this pawn.
+        local wantedMode = command.movementMode
+        if wantedMode == nil and LastAppliedMovementMode and LastAppliedMovementMode ~= "walk" then
+            wantedMode = "walk"
+        end
+        if wantedMode and inWorld and not movementSettling then
+            local mode = wantedMode
+            if mode == "walk" or mode == "fly" or mode == "ghost" then
+                if mode ~= LastAppliedMovementMode then
+                    local modeOk, modeErr = pcall(function()
+                        if mode == "fly" then cheatManager:Fly()
+                        elseif mode == "ghost" then cheatManager:Ghost()
+                        else cheatManager:Walk() end
+                    end)
+                    if modeOk then
+                        LastAppliedMovementMode = mode
+                    elseif not ReportedMovementModeError then
+                        print("[DawnwalkerModBridge] Movement mode change failed: " .. tostring(modeErr))
+                        ReportedMovementModeError = true
+                    end
+                end
+                status.movementModeApplied = LastAppliedMovementMode or "none"
+            else
+                status.movementModeRejected = "unknown_mode"
+            end
+        end
     else
         status.cheatManagerFound = 0
     end
+
+    -- Vampire blood bar: same Lock/SetPercent pattern that works for stamina, on the PlayerState's
+    -- BloodBarComponent. Gated behind the combat settle window since it's tied to the pawn's ASC.
+    local bloodBar = inWorld and FindValid(GetBloodBarComponent) or nil
+    if bloodBar and not combatSettling then
+        status.bloodBarFound = 1
+        if command.infiniteBlood == "1" then
+            pcall(function() bloodBar:SetBloodPercent(1.0) end)
+            local lockOk, lockErr = pcall(function() bloodBar:LockBlood() end)
+            if lockOk then
+                WasBloodLocked = true
+            elseif not ReportedLockBloodError then
+                print("[DawnwalkerModBridge] LockBlood failed: " .. tostring(lockErr))
+                ReportedLockBloodError = true
+            end
+        elseif WasBloodLocked then
+            local unlockOk, unlockErr = pcall(function() bloodBar:UnlockBlood() end)
+            if unlockOk then
+                WasBloodLocked = false
+            elseif not ReportedUnlockBloodError then
+                print("[DawnwalkerModBridge] UnlockBlood failed: " .. tostring(unlockErr))
+                ReportedUnlockBloodError = true
+            end
+        end
+        status.bloodLocked = WasBloodLocked and 1 or 0
+        local bloodOk, blood = pcall(function() return bloodBar:GetBlood() end)
+        status.blood = bloodOk and blood or "unknown"
+    else
+        status.bloodBarFound = bloodBar and 1 or 0
+    end
+
+    -- Ability cooldowns: the subsystem exposes a debug toggle plus a getter, so this is made
+    -- idempotent by only toggling when the current state differs from the requested one. Left
+    -- entirely alone unless the user has set the toggle, or we disabled cooldowns earlier and the
+    -- field has since been removed (reset to defaults).
+    local wantCooldownsDisabled = command.noCooldowns == "1"
+    local focusSubsystem = (inWorld and (command.noCooldowns ~= nil or CooldownsDisabledByUs)) and FindValid(GetFocusAbilitiesSubsystem) or nil
+    if focusSubsystem then
+        status.focusSubsystemFound = 1
+        local enabledOk, cooldownsEnabled = pcall(function() return focusSubsystem:AreCooldownsEnabled_Debug() end)
+        if enabledOk then
+            if cooldownsEnabled == wantCooldownsDisabled then
+                local toggleOk, toggleErr = pcall(function() focusSubsystem:ToggleDisablingAllCooldowns_Debug() end)
+                if toggleOk then
+                    cooldownsEnabled = not cooldownsEnabled
+                elseif not ReportedCooldownToggleError then
+                    print("[DawnwalkerModBridge] Cooldown toggle failed: " .. tostring(toggleErr))
+                    ReportedCooldownToggleError = true
+                end
+            end
+            CooldownsDisabledByUs = (cooldownsEnabled == false)
+            status.cooldownsDisabled = cooldownsEnabled and 0 or 1
+        end
+    else
+        status.focusSubsystemFound = 0
+    end
+
+    -- Difficulty + live combat readouts. Both setters are applied once per value change (and
+    -- again after a respawn, via the LastApplied resets) rather than re-asserted every tick, so
+    -- the mod never fights the game's own settings screen.
+    local combatSubsystem = inWorld and FindValid(GetCombatSubsystem) or nil
+    if combatSubsystem then
+        status.combatSubsystemFound = 1
+        if command.actionDifficulty then
+            local wanted = tonumber(command.actionDifficulty)
+            if wanted and wanted >= 0 and wanted <= 3 then
+                wanted = math.floor(wanted)
+                if LastAppliedActionDifficulty ~= wanted then
+                    if OriginalActionDifficulty == nil then
+                        local origOk, orig = pcall(function() return combatSubsystem:GetActionDifficultyLevel() end)
+                        if origOk and type(orig) == "number" then OriginalActionDifficulty = orig end
+                    end
+                    if pcall(function() combatSubsystem:SetActionDifficulty(wanted) end) then
+                        LastAppliedActionDifficulty = wanted
+                    end
+                end
+            else
+                status.actionDifficultyRejected = "out_of_range"
+            end
+        elseif LastAppliedActionDifficulty ~= nil and OriginalActionDifficulty ~= nil then
+            -- Field removed (reset/preset): restore the level the game had before our first write.
+            if pcall(function() combatSubsystem:SetActionDifficulty(OriginalActionDifficulty) end) then
+                LastAppliedActionDifficulty = nil
+            end
+        end
+        local currentOk, currentAction = pcall(function() return combatSubsystem:GetActionDifficultyLevel() end)
+        status.actionDifficulty = currentOk and currentAction or "unknown"
+        if command.rpgDifficulty then
+            local wanted = tonumber(command.rpgDifficulty)
+            if wanted and wanted >= 0 and wanted <= 3 then
+                wanted = math.floor(wanted)
+                if LastAppliedRPGDifficulty ~= wanted then
+                    if pcall(function() combatSubsystem:SetRPGDifficulty(wanted) end) then
+                        LastAppliedRPGDifficulty = wanted
+                    end
+                end
+                status.rpgDifficultyApplied = LastAppliedRPGDifficulty or "none"
+            else
+                status.rpgDifficultyRejected = "out_of_range"
+            end
+        end
+        local inCombatOk, inCombat = pcall(function() return combatSubsystem:GetIsInCombat() end)
+        status.inCombat = (inCombatOk and inCombat) and 1 or 0
+        local countOk, count = pcall(function() return combatSubsystem:GetAggressiveNpcCount() end)
+        status.aggressiveNpcCount = countOk and count or "unknown"
+    else
+        status.combatSubsystemFound = 0
+    end
+
+    -- Inventory: coin readout + carry weight. Same per-pawn component hazard as movement, so it
+    -- shares the movement settle window rather than getting a new one.
+    if not movementSettling and player and SafeIsValid(player) then
+        local inv = GetPlayerInventoryComponent(player)
+        if inv and SafeIsValid(inv) then
+            status.inventoryFound = 1
+            local coinsOk, coins = pcall(function() return inv:GetCurrencyAmount(0) end)
+            status.coins = coinsOk and coins or "unknown"
+            local baseWeightLimit = (command.carryWeightMultiplier or BaseValues.weightLimit) and GetBaseValue("weightLimit", inv, "WeightLimit") or nil
+            local weightMult, weightErr = ReadMultiplier(command, "carryWeightMultiplier", "weightLimit", 0.1, 100)
+            if baseWeightLimit and weightMult then
+                local applied, applyErr = pcall(function() inv.WeightLimit = baseWeightLimit * weightMult end)
+                status.carryWeightApplied = applied and 1 or 0
+                if not applied and not ReportedCarryWeightError then
+                    print("[DawnwalkerModBridge] WeightLimit write failed: " .. tostring(applyErr))
+                    ReportedCarryWeightError = true
+                end
+            elseif weightErr then
+                status.carryWeightApplied = 0
+                status.carryWeightRejected = weightErr
+            end
+            local weightOk, weight = pcall(function() return inv:GetCurrentWeight() end)
+            local limitOk, limit = pcall(function() return inv:GetWeightLimit() end)
+            status.carryWeight = weightOk and weight or "unknown"
+            status.carryWeightLimit = limitOk and limit or "unknown"
+        else
+            status.inventoryFound = 0
+        end
+    end
+
+    -- Game clock readouts (day counter, story deadline day, time of day). DayTime has reflected
+    -- Hour/Minute/Second fields, so the struct return marshals to a plain Lua table.
+    local timeSystem = inWorld and FindValid(GetTimeSystem) or nil
+    if timeSystem then
+        status.timeSystemFound = 1
+        local dayOk, day = pcall(function() return timeSystem:GetCurrentDay() end)
+        local goalOk, goal = pcall(function() return timeSystem:GetMainGoalDay() end)
+        status.currentDay = dayOk and day or "unknown"
+        status.mainGoalDay = goalOk and goal or "unknown"
+        local clockOk, clock = pcall(function() return timeSystem:GetCurrentDayTime() end)
+        if clockOk and type(clock) == "table" and clock.Hour ~= nil then
+            status.timeOfDay = string.format("%02d:%02d", tonumber(clock.Hour) or 0, tonumber(clock.Minute) or 0)
+        else
+            local hoursOk, hours = pcall(function() return timeSystem:GetCurrentDayTimeAsFloat() end)
+            status.dayTimeHours = hoursOk and hours or "unknown"
+        end
+    else
+        status.timeSystemFound = 0
+    end
+
+    -- One-shot action dispatcher. Noticing the nonce and executing are deliberately decoupled:
+    -- the request stays pending (retried every tick) until its preconditions are met or it
+    -- times out, instead of being consumed and dropped by a settle window.
+    if command.actionId and command.actionId ~= LastActionId then
+        LastActionId = command.actionId
+        if command.action then
+            PendingAction = { id = command.actionId, name = command.action, arg = command.actionArg, ticksWaited = 0 }
+            LastActionResult = "pending"
+        end
+    end
+    if PendingAction then
+        local ctx = {
+            player = (player and SafeIsValid(player)) and player or nil,
+            subsystem = (subsystem and SafeIsValid(subsystem)) and subsystem or nil,
+            cheatManager = (cheatManager and SafeIsValid(cheatManager)) and cheatManager or nil,
+            combat = resolvedCombat,
+            combatSettling = combatSettling,
+            componentSettling = resolvedComponentSettling,
+            movementSettling = movementSettling,
+        }
+        local runOk, done, result = pcall(RunAction, PendingAction.name, PendingAction.arg, ctx)
+        if not runOk then
+            done, result = true, "error: " .. tostring(done)
+        end
+        if done then
+            LastActionResult = result
+            print(string.format("[DawnwalkerModBridge] Action %s -> %s", tostring(PendingAction.name), tostring(result)))
+            PendingAction = nil
+        else
+            PendingAction.ticksWaited = PendingAction.ticksWaited + 1
+            if PendingAction.ticksWaited >= ACTION_TIMEOUT_TICKS then
+                LastActionResult = "failed: timed out (" .. tostring(result) .. ")"
+                print(string.format("[DawnwalkerModBridge] Action %s timed out: %s", tostring(PendingAction.name), tostring(result)))
+                PendingAction = nil
+            else
+                LastActionResult = "pending: " .. tostring(result)
+            end
+        end
+    end
+    status.actionResult = LastActionResult
+    status.lastActionId = LastActionId or 0
 
     status.ok = 1
     status.lastAppliedRequestId = LastRequestId or 0
@@ -1066,8 +1550,10 @@ local function StartFastHealthStaminaLoop()
                 end
                 if fastLoopSettleTicksRemaining > 0 then return end
                 if CombatSettleTicksRemaining > 0 then return end
+                if CutsceneActive then return end
+                if not AppConnected then return end
                 local command = ReadCommandFile()
-                if not command then return end
+                if not IsHandshaken(command) then return end
                 local combat = GetPlayerCombatComponent(player)
                 if not combat or not SafeIsValid(combat) then return end
                 -- Screenshot evidence (2026-09-03) showed a fatal crash dump written at the exact
