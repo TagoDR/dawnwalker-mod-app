@@ -49,7 +49,7 @@ Examples:
 - `jumpMultiplier`
 - `fovMultiplier`
 - `gameSpeed`
-- `damageMultiplier`
+- `damageAmplifier`
 - `carryWeightMultiplier`
 - `actionDifficulty`
 - `rpgDifficulty`

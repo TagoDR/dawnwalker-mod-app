@@ -33,7 +33,7 @@ These are runtime setting entries the Lua bridge re-applies every tick while sti
 | `jumpMultiplier` | float | jump power scaling |
 | `fovMultiplier` | float | field-of-view multiplier |
 | `gameSpeed` | float | overall game time scaling |
-| `damageMultiplier` | float | damage multiplier |
+| `damageAmplifier` | float | re-applies each hostile enemy's health drop, scaled (1 = off) |
 | `carryWeightMultiplier` | float | carry weight scaling |
 | `actionDifficulty` | int | action difficulty level |
 | `rpgDifficulty` | int | RPG difficulty level |
@@ -87,7 +87,7 @@ The bridge contract is intentionally narrow. The app only writes the keys that a
 - `jumpMultiplier`
 - `fovMultiplier`
 - `gameSpeed`
-- `damageMultiplier`
+- `damageAmplifier`
 - `carryWeightMultiplier`
 - `actionDifficulty`
 - `rpgDifficulty`
@@ -103,10 +103,8 @@ The bridge contract is intentionally narrow. The app only writes the keys that a
 - `addMutationCharges`
 - `addCoins`
 - `unlockAllRecipes`
-- `addAllIngredients`
 - `unlockAllFastTravel`
 - `revealAllMappins`
-- `killTarget`
 - `killAllAggressive`
 - `teleport`
 - `setTimeOfDay`

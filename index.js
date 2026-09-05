@@ -611,13 +611,7 @@ function applySpeedMultiplier(mult) { return applyBridgeField("speedMultiplier",
 function applyJumpMultiplier(mult) { return applyBridgeField("jumpMultiplier", mult); }
 function applyFovMultiplier(mult) { return applyBridgeField("fovMultiplier", mult); }
 function applyGameSpeed(speed) { return applyBridgeField("gameSpeed", speed); }
-function applyDamageMultiplier(mult) { return applyBridgeField("damageMultiplier", mult); }
-
-function applyNukeTarget(amount) {
-  const numericAmount = Math.max(1, Math.min(999999, Number(amount)));
-  if (!Number.isFinite(numericAmount)) return { ok: false, error: "Invalid damage amount" };
-  return writeBridgeCommand({ nukeRequestId: nextNonce(), nukeDamage: numericAmount });
-}
+function applyDamageAmplifier(value) { return applyBridgeField("damageAmplifier", value); }
 
 // One-shot action executed once by the Lua mod (actionId nonce).
 function applyBridgeAction(name, arg) {
@@ -721,16 +715,23 @@ function clearNativeFixCommand() {
 
 let nativeFixRequestCounter = 0;
 
-function applyGiveGearNative(gearId) {
+// Mirrors kMaxGrantQuantity in native-mods/DawnwalkerNativeFix/dllmain.cpp.
+const MAX_GRANT_QUANTITY = 99;
+
+function applyGiveGearNative(gearId, quantity = 1) {
   const paths = getNativeFixPaths();
   if (!paths) return { ok: false, error: "Game install was not found" };
   if (!isNativeFixDeployed()) return { ok: false, error: "Native fix mod is not deployed yet" };
   if (!gearId || typeof gearId !== "string") return { ok: false, error: "Invalid gear id" };
 
+  const amount = Math.min(MAX_GRANT_QUANTITY, Math.max(1, Math.floor(Number(quantity) || 1)));
   nativeFixRequestCounter += 1;
   try {
     fs.mkdirSync(paths.modDir, { recursive: true });
-    fs.writeFileSync(paths.commandFile, `requestId=${nativeFixRequestCounter}\ngiveGearId=${gearId}\n`);
+    fs.writeFileSync(
+      paths.commandFile,
+      `requestId=${nativeFixRequestCounter}\ngiveGearId=${gearId}\ngiveGearQty=${amount}\n`,
+    );
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message || "Failed to write native fix command" };
@@ -829,7 +830,7 @@ app.whenReady().then(() => {
   ipcMain.handle("bridge:reset", () => resetBridgeState());
   ipcMain.handle("nativefix:deploy", () => deployNativeFix());
   ipcMain.handle("nativefix:status", () => readNativeFixStatus());
-  ipcMain.handle("nativefix:give-gear", (_event, gearId) => applyGiveGearNative(gearId));
+  ipcMain.handle("nativefix:give-gear", (_event, gearId, quantity) => applyGiveGearNative(gearId, quantity));
   ipcMain.handle("nativefix:remove-gear", (_event, gearId) => applyRemoveGearNative(gearId));
   ipcMain.handle("bridge:apply-infinite-health", (_event, enabled) => applyInfiniteHealth(enabled));
   ipcMain.handle("bridge:apply-infinite-stamina", (_event, enabled) => applyInfiniteStamina(enabled));
@@ -837,8 +838,7 @@ app.whenReady().then(() => {
   ipcMain.handle("bridge:apply-jump", (_event, mult) => applyJumpMultiplier(mult));
   ipcMain.handle("bridge:apply-fov", (_event, mult) => applyFovMultiplier(mult));
   ipcMain.handle("bridge:apply-game-speed", (_event, speed) => applyGameSpeed(speed));
-  ipcMain.handle("bridge:apply-damage-multiplier", (_event, mult) => applyDamageMultiplier(mult));
-  ipcMain.handle("bridge:nuke-target", (_event, amount) => applyNukeTarget(amount));
+  ipcMain.handle("bridge:apply-damage-amplifier", (_event, value) => applyDamageAmplifier(value));
   createWindow();
 
   const heartbeatTimer = setInterval(writeHeartbeat, 5000);

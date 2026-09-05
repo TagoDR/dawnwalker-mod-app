@@ -8,9 +8,12 @@ import DWSelect from "../components/ui/DWSelect";
 import DWSlider from "../components/ui/DWSlider";
 import DWButton from "../components/ui/DWButton";
 
-import { GEAR_CATALOG, CLEANUP_CATALOG } from "../data/GearCatalog";
+import { GEAR_CATALOG, CLEANUP_CATALOG, CRAFTABLE_CATALOG } from "../data/GearCatalog";
 import { useBridge, commandNumber } from "../bridge/useBridge";
 import BridgePanel, { Readouts, ActionRow, ButtonRow, Note } from "../bridge/BridgePanel";
+
+// Mirrors kMaxGrantQuantity in native-mods/DawnwalkerNativeFix/dllmain.cpp.
+const MAX_GRANT_AMOUNT = 99;
 
 // Coins, crafting and carry weight go through the Lua bridge (InventoryComponent /
 // CraftingSubsystem) - unlike item granting, none of these need FItemHandle marshalling.
@@ -18,7 +21,6 @@ function InventorySection() {
   const api = useBridge();
   const { status, command, busy, applyField, runAction } = api;
   const [coins, setCoins] = useState(1000);
-  const [ingredientSets, setIngredientSets] = useState(1);
 
   return (
     <BridgePanel bridgeApi={api} title="Inventory (Lua bridge)">
@@ -63,37 +65,59 @@ function InventorySection() {
               data-clickpulse
               data-glow
             />
-          </ButtonRow>
-          <div style={{ marginTop: 12 }}>
-            <ActionRow
-              label="Add Ingredients"
+            <DWButton
+              label="Log Item Names"
               disabled={busy}
-              onClick={() => runAction("addAllIngredients", ingredientSets, "Ingredients sent to the game.")}
-            >
-              <DWSlider label="Crafts' Worth of Ingredients (every recipe)" value={ingredientSets} onChange={setIngredientSets} min={1} max={10} />
-            </ActionRow>
-          </div>
-          <Note>CraftingSubsystem:UnlockAllCraftingRecipes / AddIngredientsForAllCraftingRecipes.</Note>
+              onClick={() => runAction("dumpItemNames", null, "Item names written to UE4SS.log.")}
+              data-clickpulse
+            />
+            <DWButton
+              label="Check Game Compatibility"
+              disabled={busy}
+              onClick={() => runAction("selfCheck", null, "Compatibility check sent to the game.")}
+              data-clickpulse
+            />
+          </ButtonRow>
+          <Readouts
+            items={[
+              ["Item names captured", status?.itemNamesLogged],
+              ["Menu open", status?.menuOpen === "1" ? "Yes" : "No"],
+              ["Last action result", status?.actionResult],
+            ]}
+          />
+          <Note>
+            CraftingSubsystem:UnlockAllCraftingRecipes. For ingredients and crafted goods, pick the exact item
+            and amount from the Consumable / Ingredient lists above - the old "add ingredients for every recipe"
+            call crashed the game. Item names are captured automatically whenever you open an in-game menu;
+            the button forces a pass now. "Check Game Compatibility" verifies every function this app calls
+            still exists - run it after a game update.
+          </Note>
         </RuneSection>
       </RuneStagger>
     </BridgePanel>
   );
 }
 
-// One dropdown + "Grant" button for a single gear category (Weapon, Armor Set, Ring, Amulet).
-// Granting is scoped to whichever single option is selected, instead of dumping every item at
-// once - see repo memory: granting 26 items in one native tick flooded the game's own quest/
-// notification system and crashed it.
-function GearCategorySection({ category, options, bridge, busy, actionLabel, onAction }) {
+// One dropdown + amount + action button for a single catalog category (Weapon, Armor Set, Ring,
+// Amulet, Consumable, Ingredient, Cleanup). Granting is scoped to whichever single option is
+// selected, instead of dumping every item at once - see repo memory: granting 26 items in one
+// native tick flooded the game's own quest/notification system and crashed it.
+function GearCategorySection({ category, options, bridge, busy, actionLabel, onAction, showAmount = false }) {
   const [selected, setSelected] = useState(options[0].value);
+  const [amount, setAmount] = useState(1);
 
   return (
     <RuneSection title={category}>
-      <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <DWSelect label={`Select ${category}`} value={selected} onChange={setSelected} options={options} />
+        {showAmount && (
+          <div style={{ minWidth: 200 }}>
+            <DWSlider label="Amount" value={amount} onChange={setAmount} min={1} max={MAX_GRANT_AMOUNT} step={1} />
+          </div>
+        )}
         <DWButton
           label={`${actionLabel} ${category}`}
-          onClick={() => onAction(selected)}
+          onClick={() => onAction(selected, amount)}
           disabled={!bridge || busy}
           data-clickpulse
           data-glow
@@ -129,7 +153,7 @@ export default function GearPage() {
     };
   }, [bridge]);
 
-  const handleGrant = async (gearId) => {
+  const handleGrant = async (gearId, amount = 1) => {
     setBusy(true);
     setMessage(null);
     if (!status?.deployed) {
@@ -140,8 +164,8 @@ export default function GearPage() {
         return;
       }
     }
-    const result = await bridge.giveGearNative(gearId);
-    setMessage(result.ok ? "Gear request sent to the game." : result.error);
+    const result = await bridge.giveGearNative(gearId, amount);
+    setMessage(result.ok ? `Request sent to the game (x${amount}).` : result.error);
     setBusy(false);
   };
 
@@ -192,6 +216,20 @@ export default function GearPage() {
               busy={busy}
               actionLabel="Grant"
               onAction={handleGrant}
+              showAmount
+            />
+          ))}
+
+          {CRAFTABLE_CATALOG.map(({ category, options }) => (
+            <GearCategorySection
+              key={category}
+              category={category}
+              options={options}
+              bridge={bridge}
+              busy={busy}
+              actionLabel="Grant"
+              onAction={handleGrant}
+              showAmount
             />
           ))}
 

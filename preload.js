@@ -21,15 +21,14 @@
  * @property {(mult: number) => Promise<Object>} applyJumpMultiplier
  * @property {(mult: number) => Promise<Object>} applyFovMultiplier
  * @property {(speed: number) => Promise<Object>} applyGameSpeed
- * @property {(mult: number) => Promise<Object>} applyDamageMultiplier
- * @property {(amount: number) => Promise<Object>} nukeTarget
+ * @property {(value: number) => Promise<Object>} applyDamageAmplifier
  * @property {(key: string, value: any) => Promise<Object>} applyBridgeField
  * @property {(values: Object) => Promise<Object>} applyBridgePreset
  * @property {() => Promise<Object>} resetBridge
  * @property {(name: string, arg: any) => Promise<Object>} runBridgeAction
  * @property {() => Promise<Object>} deployNativeFix
  * @property {() => Promise<Object>} nativeFixStatus
- * @property {(gearId: string) => Promise<Object>} giveGearNative
+ * @property {(gearId: string, quantity?: number) => Promise<Object>} giveGearNative
  * @property {(gearId: string) => Promise<Object>} removeGearNative
  */
 const { contextBridge, ipcRenderer } = require("electron");
@@ -57,8 +56,7 @@ const dawnwalkerApi = {
 	applyJumpMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-jump", mult),
 	applyFovMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-fov", mult),
 	applyGameSpeed: (speed) => ipcRenderer.invoke("bridge:apply-game-speed", speed),
-	applyDamageMultiplier: (mult) => ipcRenderer.invoke("bridge:apply-damage-multiplier", mult),
-	nukeTarget: (amount) => ipcRenderer.invoke("bridge:nuke-target", amount),
+	applyDamageAmplifier: (value) => ipcRenderer.invoke("bridge:apply-damage-amplifier", value),
 	// Generic persistent field (infiniteBlood, noCooldowns, movementMode, difficulty, ...) - the
 	// main process validates the key against an allowlist and clamps the value.
 	applyBridgeField: (key, value) => ipcRenderer.invoke("bridge:apply-field", key, value),
@@ -69,7 +67,7 @@ const dawnwalkerApi = {
 	runBridgeAction: (name, arg) => ipcRenderer.invoke("bridge:action", name, arg),
 	deployNativeFix: () => ipcRenderer.invoke("nativefix:deploy"),
 	nativeFixStatus: () => ipcRenderer.invoke("nativefix:status"),
-	giveGearNative: (gearId) => ipcRenderer.invoke("nativefix:give-gear", gearId),
+	giveGearNative: (gearId, quantity) => ipcRenderer.invoke("nativefix:give-gear", gearId, quantity),
 	removeGearNative: (gearId) => ipcRenderer.invoke("nativefix:remove-gear", gearId),
 };
 

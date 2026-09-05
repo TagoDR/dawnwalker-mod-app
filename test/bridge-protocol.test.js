@@ -7,7 +7,7 @@ test("sanitizeField clamps numeric fields to the same ranges main.lua enforces",
   assert.deepEqual(sanitizeField("levelCap", 200), { ok: true, key: "levelCap", value: 99 });
   assert.deepEqual(sanitizeField("levelCap", 0), { ok: true, key: "levelCap", value: 1 });
   assert.deepEqual(sanitizeField("speedMultiplier", 9), { ok: true, key: "speedMultiplier", value: 5 });
-  assert.deepEqual(sanitizeField("damageMultiplier", 50), { ok: true, key: "damageMultiplier", value: 10 });
+  assert.deepEqual(sanitizeField("damageAmplifier", 50), { ok: true, key: "damageAmplifier", value: 20 });
   assert.deepEqual(sanitizeField("actionDifficulty", 2.7), { ok: true, key: "actionDifficulty", value: 2 });
   assert.deepEqual(sanitizeField("carryWeightMultiplier", 0.5), { ok: true, key: "carryWeightMultiplier", value: 0.5 });
 });

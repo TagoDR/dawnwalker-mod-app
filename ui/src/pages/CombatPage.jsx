@@ -1,5 +1,3 @@
-import { useState } from "react";
-
 import PageHeader from "../components/ui/PageHeader";
 import RuneSection from "../components/ui/RuneSection";
 import RuneStagger from "../components/ui/RuneStagger";
@@ -9,7 +7,7 @@ import DWSelect from "../components/ui/DWSelect";
 import DWButton from "../components/ui/DWButton";
 
 import { useBridge, commandFlag, commandNumber, commandString } from "../bridge/useBridge";
-import BridgePanel, { Readouts, ActionRow, ButtonRow, Note } from "../bridge/BridgePanel";
+import BridgePanel, { Readouts, ButtonRow, Note } from "../bridge/BridgePanel";
 
 // EDWDifficultyLevel (DogwoodStats) - the game's own labels for the fourth tier is "NewHard".
 const DIFFICULTY_LEVELS = [
@@ -21,16 +19,7 @@ const DIFFICULTY_LEVELS = [
 
 export default function CombatPage() {
   const api = useBridge();
-  const { bridge, status, command, busy, setBusy, setMessage, applyField, runAction } = api;
-  const [nukeAmount, setNukeAmount] = useState(5000);
-
-  const handleNuke = async () => {
-    setBusy(true);
-    setMessage(null);
-    const result = await bridge.nukeTarget(nukeAmount);
-    setMessage(result.ok ? "Damage request sent to the game." : result.error);
-    setBusy(false);
-  };
+  const { status, command, busy, applyField, runAction } = api;
 
   return (
     <div>
@@ -68,37 +57,27 @@ export default function CombatPage() {
           <RuneStagger index={2}>
             <RuneSection title="Enemies">
               <ButtonRow>
-                <DWButton label="Kill Locked Target" disabled={busy} onClick={() => runAction("killTarget", null, "Kill request sent to the game.")} data-clickpulse data-glow />
-                <DWButton label="Kill All Aggressive Enemies" disabled={busy} onClick={() => runAction("killAllAggressive", null, "Kill-all request sent to the game.")} />
+                <DWButton label="Kill All Aggressive Enemies" disabled={busy} onClick={() => runAction("killAllAggressive", null, "Kill-all request sent to the game.")} data-clickpulse data-glow />
               </ButtonRow>
-              <Note>
-                Kill Locked Target uses the enemy you're currently locked on to (CombatComponentBase:GetTargetedEnemy).
-                Kill All uses the game's own list of NPCs currently hostile to you.
-              </Note>
-              <div style={{ marginTop: 16 }}>
-                <ActionRow label="Nuke Aimed Target" onClick={handleNuke} disabled={busy}>
-                  <DWSlider label="Nuke Damage Amount" value={nukeAmount} onChange={setNukeAmount} min={1} max={999999} step={1} />
-                </ActionRow>
-                <Note>Engine CheatManager:DamageTarget - deals this much damage to whatever you're aiming at.</Note>
-              </div>
+              <Note>Uses the game's own list of NPCs currently hostile to you.</Note>
             </RuneSection>
           </RuneStagger>
 
           <RuneStagger index={3}>
             <RuneSection title="Damage Output">
               <DWSlider
-                label="Damage Multiplier"
-                value={commandNumber(command, "damageMultiplier", 1)}
-                onChange={(v) => applyField("damageMultiplier", v)}
-                min={0.1}
-                max={10}
-                step={0.1}
+                label="Damage Amplifier"
+                value={commandNumber(command, "damageAmplifier", 1)}
+                onChange={(v) => applyField("damageAmplifier", v)}
+                min={1}
+                max={20}
+                step={0.5}
               />
-              <Readouts items={[["Applied to attributes", status?.damageMultiplierApplied === "1" ? "Yes" : "No"]]} />
-              <Note tone="warn">
-                Experimental: writes the game's damage attributes and scales displayed weapon damage, but the
-                per-hit damage formula has not been confirmed to read them. Use the enemy actions above for a
-                guaranteed effect.
+              <Readouts items={[["Enemies amplified last tick", status?.damageAmplified]]} />
+              <Note>
+                The game's per-hit damage formula can't be reached, so this works from the other side: ten
+                times a second it checks every hostile enemy's health and re-applies the drop you just caused,
+                scaled by this value. At 3x a hit takes off three times as much. 1x is off.
               </Note>
             </RuneSection>
           </RuneStagger>

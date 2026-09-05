@@ -42,8 +42,6 @@ local COMMAND_PATH = "Mods/DawnwalkerModBridge/command.txt"
 local STATUS_PATH = "Mods/DawnwalkerModBridge/status.txt"
 
 local LastRequestId = nil
-local LastNukeRequestId = nil
-local LastNukeTargetResult = nil
 local WasCombatFound = false
 local ReportedLockHealthError = false
 local ReportedUnlockHealthError = false
@@ -57,21 +55,16 @@ local ReportedRemoveInvulnerabilityError = false
 local WasRebelAIFound = false
 -- Infinite Health/Stamina is intentionally layered across several redundant mechanisms
 -- (AddPlayerInvulnerability, the GAS GE_Invulnerability effect below, native CheatManager:God(),
--- and the raw GAS Health-attribute write in ForceDirectHealthAttribute further down). The real
--- crash-on-respawn bug (see repo memory) turned out to be a settle-window race condition, not any
--- one of these mechanisms - do not remove any of them without reason, they're kept as
--- belt-and-suspenders, not because any single one was proven necessary or sufficient.
+-- and CombatComponentBase's own LockHealth/SetHealthPercent). The real crash-on-respawn bug (see
+-- repo memory) turned out to be a settle-window race condition, not any one of these mechanisms -
+-- do not remove any of them without reason, they're kept as belt-and-suspenders, not because any
+-- single one was proven necessary or sufficient.
 local InvulnerabilityGEClass = nil
 local WasGodModeApplied = false
 local ReportedGodModeApplyError = false
 local ReportedGodModeRemoveError = false
 local WasNativeGodModeApplied = false
 local ReportedNativeGodModeError = false
-local ReportedDirectHealthWriteError = false
-local DirectHealthDiagLogCount = 0
-local LastRawHealth = "unknown"
-local LastRawMaxHealth = "unknown"
-local LastDirectHealthWriteOk = 0
 
 -- One-shot actions (actionId nonce + action name + optional actionArg). The nonce only marks a
 -- request as noticed; execution is retried each tick until preconditions are met or it times out,
@@ -133,6 +126,17 @@ local ReportedMovementModeError = false
 local ReportedCooldownToggleError = false
 local PlayerAttributeSetClass = nil
 local ReportedActionSlotsWriteError = false
+local WasActionSlotsOverridden = false
+-- Fallback when UnlockedActionSlots can't be read; the UI never exposes more than this many slots.
+local MAX_ACTION_SLOTS = 5
+-- Damage amplifier: last seen health percent per enemy actor address, so the next tick can tell
+-- how much damage the game just dealt and re-apply it scaled. SharedAmplifier is published by the
+-- 1s command tick and consumed by the dedicated fast loop, so that hot path never reads a file.
+local AmpHealth = {}
+local SharedAmplifier = 1
+local LastAmplifiedCount = 0
+local AmpLoopLastPawnAddress = nil
+local AmpLoopSettleTicks = 0
 local ReportedCarryWeightError = false
 
 local function ReadCommandFile()
@@ -323,31 +327,43 @@ local function IsCutsceneActive(player)
     return false
 end
 
--- Keeps the player's ability activation charges (PlayerAttributeSet ChargedActionSlots) topped up
--- to their unlocked capacity - same raw GAS struct write technique as ForceDirectHealthAttribute,
--- so it must only ever run behind the same settle/IsAlive gates.
-local function ForceActionSlotsCharged(player)
-    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
-    if not ascOk or not asc or not SafeIsValid(asc) then return false end
-    if not PlayerAttributeSetClass or not SafeIsValid(PlayerAttributeSetClass) then
-        local classOk, class = pcall(function()
-            return StaticFindObject("/Script/DogwoodStats.PlayerAttributeSet")
-        end)
-        if classOk and class then PlayerAttributeSetClass = class end
+-- Keeps the player's ability activation charges topped up via CombatFocusComponent's own
+-- SetSlotsChargedOverride/ResetSlotsChargedOverride, the game's supported override for exactly
+-- this - no raw GAS struct write. UnlockedActionSlots is only READ, to know how many to grant.
+local function ApplyActionSlotsOverride(player, enabled)
+    local focus = FindOwnedComponent("CombatFocusComponent", player)
+    if not focus or not SafeIsValid(focus) then return false end
+
+    if not enabled then
+        local resetOk = pcall(function() focus:ResetSlotsChargedOverride() end)
+        if resetOk then WasActionSlotsOverridden = false end
+        return false
     end
-    if not PlayerAttributeSetClass then return false end
-    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(PlayerAttributeSetClass) end)
-    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return false end
-    local readOk, unlocked = pcall(function() return attrSet.UnlockedActionSlots.CurrentValue end)
-    if not readOk or not unlocked or unlocked <= 0 then return false end
-    -- Touch the struct as little as possible: only the live value, and only when it has dropped.
-    local curOk, charged = pcall(function() return attrSet.ChargedActionSlots.CurrentValue end)
-    if curOk and charged and charged >= unlocked then return true end
-    local writeOk, writeErr = pcall(function()
-        attrSet.ChargedActionSlots.CurrentValue = unlocked
-    end)
-    if not writeOk and not ReportedActionSlotsWriteError then
-        print("[DawnwalkerModBridge] ChargedActionSlots write failed: " .. tostring(writeErr))
+
+    local slots = 0
+    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
+    if ascOk and asc and SafeIsValid(asc) then
+        if not PlayerAttributeSetClass or not SafeIsValid(PlayerAttributeSetClass) then
+            local classOk, class = pcall(function()
+                return StaticFindObject("/Script/DogwoodStats.PlayerAttributeSet")
+            end)
+            if classOk and class then PlayerAttributeSetClass = class end
+        end
+        if PlayerAttributeSetClass then
+            local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(PlayerAttributeSetClass) end)
+            if attrSetOk and attrSet and SafeIsValid(attrSet) then
+                local readOk, unlocked = pcall(function() return attrSet.UnlockedActionSlots.CurrentValue end)
+                if readOk and unlocked and unlocked > 0 then slots = unlocked end
+            end
+        end
+    end
+    if slots <= 0 then slots = MAX_ACTION_SLOTS end
+
+    local writeOk, writeErr = pcall(function() focus:SetSlotsChargedOverride(slots) end)
+    if writeOk then
+        WasActionSlotsOverridden = true
+    elseif not ReportedActionSlotsWriteError then
+        print("[DawnwalkerModBridge] SetSlotsChargedOverride failed: " .. tostring(writeErr))
         ReportedActionSlotsWriteError = true
     end
     return writeOk
@@ -374,6 +390,216 @@ local function KillCombatComponentsOwnedBy(ownerAddresses, skipAddress)
         end
     end
     return killed
+end
+
+-- Every item data asset class whose display names the app's catalogs need.
+local ITEM_NAME_DUMP_CLASSES = {
+    "ItemConsumableDataAsset",
+    "ItemIngredientDataAsset",
+    "ItemWeaponDataAsset",
+    "ItemClothingDataAsset",
+}
+
+-- Everything this app binds to by name. A game update can rename or remove any of it, and because
+-- every call site fails soft (pcall / nil checks), the symptom would otherwise be a control that
+-- silently does nothing. selfCheck resolves the whole list in one pass so a patch turns into a
+-- list of names instead of a debugging session.
+local SELF_CHECK_CLASSES = {
+    "CharacterDevelopmentSubsystem", "CombatSubsystem", "CraftingSubsystem", "CinematicSubsystem",
+    "FocusAbilitiesSubsystem", "TimeSystemImpl", "BloodBarComponent", "OpenWorldJournalImpl",
+    "PlayerCameraManager", "CheatManager", "RebelAISubsystem", "InventoryComponent",
+    "CombatComponentBase", "CombatFocusComponent", "CharacterMovementComponent",
+}
+
+local SELF_CHECK_OBJECTS = {
+    "/Script/DogwoodStats.PlayerAttributeSet",
+    "/Script/DogwoodInventory.ItemHandle",
+    "/Script/DogwoodInventory.Default__InventoryBlueprintFunctionLibrary",
+    "/Script/DogwoodMap.Default__MappinSystemBlueprintLibrary",
+    "/Script/DogwoodCombat.CombatComponentBase:SetHealthPercent",
+    "/Script/DogwoodCombat.CombatComponentBase:GetHealthPercentage",
+    "/Script/DogwoodCombat.CombatComponentBase:LockHealth",
+    "/Script/DogwoodCombat.CombatComponentBase:LockStamina",
+    "/Script/DogwoodCombat.CombatComponentBase:Kill",
+    "/Script/DogwoodCombat.CombatComponentBase:IsAlive",
+    "/Script/DogwoodCombat.CombatFocusComponent:SetSlotsChargedOverride",
+    "/Script/DogwoodCombat.CombatFocusComponent:ResetSlotsChargedOverride",
+    "/Script/DogwoodCombat.CombatSubsystem:GetAllAggressiveNPCActors",
+    "/Script/DogwoodCombat.CombatSubsystem:SetActionDifficulty",
+    "/Script/DogwoodInventory.CraftingSubsystem:UnlockAllCraftingRecipes",
+    "/Script/DogwoodInventory.InventoryComponent:TryAddItem",
+    "/Script/DogwoodInventory.InventoryComponent:TryAddAndEquipItem",
+    "/Script/DogwoodInventory.InventoryComponent:RemoveItem",
+    "/Script/DogwoodInventory.InventoryComponent:GetItemQuantity",
+    "/Script/DogwoodInventory.InventoryComponent:GetHandleForAssetInInventory",
+    "/Script/DogwoodInventory.InventoryComponent:AddCurrency",
+    "/Script/DogwoodInventory.InventoryBlueprintFunctionLibrary:GetItemHandle",
+    "/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:GetCurrentLevel",
+    "/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:ForceLevelUpTo",
+    "/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:AddQuestXP",
+    "/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:UnlockAllTraits",
+    "/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:AddMutationCharges",
+    "/Script/DogwoodMap.MappinSystemBlueprintLibrary:DebugUnlockAllFastTravelDestinations",
+    "/Script/DogwoodMap.OpenWorldJournalInterface:RevealAllMappins",
+    "/Script/Engine.CheatManager:God",
+    "/Script/Engine.CheatManager:Slomo",
+    "/Script/Engine.CheatManager:Fly",
+    "/Script/Engine.CheatManager:Teleport",
+}
+
+-- ItemName is an FText; UE4SS exposes it as either a userdata with ToString() or a plain string
+-- depending on the property, so try both before giving up. The game's item string table populates
+-- lazily, so an asset the UI hasn't displayed yet resolves to a missing-entry marker rather than a
+-- name - treat that as unresolved and fall back to the ItemId FName.
+local function ReadItemDisplayName(asset)
+    local function usable(value)
+        return type(value) == "string" and value ~= "" and not value:find("MISSING STRING TABLE ENTRY", 1, true)
+    end
+    local ok, text = pcall(function() return asset.ItemName end)
+    if ok and text ~= nil then
+        if usable(text) then return text end
+        local strOk, str = pcall(function() return text:ToString() end)
+        if strOk and usable(str) then return str end
+    end
+    local idOk, id = pcall(function() return asset.ItemId:ToString() end)
+    if idOk and usable(id) then return id end
+    return nil
+end
+
+-- Names already written to the log this session, so a repeat scan only reports what is new.
+local LoggedItemNames = {}
+local LoggedItemNameCount = 0
+-- Latches while a menu stays open so the passive scan runs once per visit, not once per tick.
+local MenuScanDone = false
+
+-- Walks the item data assets and logs any display name not already seen. Cheap to call repeatedly
+-- once the catalog is warm: the expensive part is the FindAllOf scans, and every asset whose name
+-- has already been captured is skipped without touching its properties.
+local function DumpNewItemNames()
+    local dumped = 0
+    for _, className in ipairs(ITEM_NAME_DUMP_CLASSES) do
+        local listOk, assets = pcall(FindAllOf, className)
+        if listOk and assets then
+            for _, asset in ipairs(assets) do
+                if SafeIsValid(asset) then
+                    local pathOk, fullName = pcall(function() return asset:GetFullName() end)
+                    if pathOk and fullName and not LoggedItemNames[fullName] then
+                        local label = ReadItemDisplayName(asset)
+                        if label then
+                            LoggedItemNames[fullName] = true
+                            LoggedItemNameCount = LoggedItemNameCount + 1
+                            dumped = dumped + 1
+                            print(string.format("[DawnwalkerModBridge] ItemName: %s = %s", tostring(fullName), label))
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return dumped
+end
+
+-- The item string table populates lazily, so names only resolve once the game has displayed them.
+-- Menus are both when that happens and when the game has spare time, so the passive scan waits for
+-- one: gameplay widgets hidden (or the HUD hidden) while a pawn exists means a full-screen UI.
+local function IsMenuOpen()
+    local ui = FindValid(function() return FindFirstOf("UIManagerSubsystem") end)
+    if ui then
+        local ok, showing = pcall(function() return ui:ShouldShowGameplayWidgets() end)
+        if ok and showing == false then return true end
+    end
+    local hud = FindValid(function() return FindFirstOf("HUDManagerSubsystem") end)
+    if hud then
+        local ok, visible = pcall(function() return hud:IsHUDVisible() end)
+        if ok and visible == false then return true end
+    end
+    return false
+end
+
+-- Collects the addresses of every actor the combat subsystem currently considers aggressive.
+local function GetAggressiveNpcAddresses()
+    local combatSubsystem = FindValid(GetCombatSubsystem)
+    if not combatSubsystem then return nil, 0 end
+    local actorsOk, actors = pcall(function() return combatSubsystem:GetAllAggressiveNPCActors() end)
+    if not actorsOk or type(actors) ~= "table" then return nil, 0 end
+    local addresses = {}
+    local count = 0
+    for _, param in ipairs(actors) do
+        -- TArray elements arrive as RemoteUnrealParam wrappers (:get() yields the actor); fall
+        -- back to treating the element as the actor itself if this UE4SS build differs.
+        local getOk, actor = pcall(function() return param:get() end)
+        if not getOk or not actor then actor = param end
+        if actor and SafeIsValid(actor) then
+            local addrOk, addr = pcall(function() return actor:GetAddress() end)
+            if addrOk then
+                addresses[addr] = true
+                count = count + 1
+            end
+        end
+    end
+    return addresses, count
+end
+
+-- The game's real damage calculation was never found (see repo memory: seven separate attempts to
+-- influence or hook it all failed), so this does not try to touch it. Instead it lets the game deal
+-- its normal damage, then re-applies whatever health drop just happened, scaled by `multiplier` -
+-- turning a normal hit into an Nx hit. Uses only GetHealthPercentage/SetHealthPercent/Kill on the
+-- enemy's own combat component, the exact calls proven to work there by killAllAggressive.
+-- Deliberately keyed off aggressive NPCs rather than the locked-on target: GetTargetedEnemy() was
+-- confirmed not to resolve in this build, while GetAllAggressiveNPCActors() does.
+local function AmplifyDamageToAggressiveNPCs(player, multiplier)
+    local addresses, count = GetAggressiveNpcAddresses()
+    if not addresses or count == 0 then
+        if next(AmpHealth) ~= nil then AmpHealth = {} end
+        return 0
+    end
+
+    local componentsOk, components = pcall(FindAllOf, "CombatComponentBase")
+    if not componentsOk or not components then return 0 end
+
+    local playerAddrOk, playerAddr = pcall(function() return player:GetAddress() end)
+    local skipAddress = playerAddrOk and playerAddr or nil
+
+    local seen = {}
+    local amplified = 0
+    for _, component in ipairs(components) do
+        if SafeIsValid(component) then
+            local ownerOk, owner = pcall(function() return component:GetOwner() end)
+            if ownerOk and owner and SafeIsValid(owner) then
+                local addrOk, addr = pcall(function() return owner:GetAddress() end)
+                if addrOk and addr ~= skipAddress and addresses[addr] then
+                    seen[addr] = true
+                    local aliveOk, alive = pcall(function() return component:IsAlive() end)
+                    if not (aliveOk and alive == false) then
+                        local hpOk, hp = pcall(function() return component:GetHealthPercentage() end)
+                        if hpOk and type(hp) == "number" then
+                            local previous = AmpHealth[addr]
+                            if previous and hp < previous then
+                                local extra = (previous - hp) * (multiplier - 1)
+                                local wanted = hp - extra
+                                if wanted <= 0 then
+                                    if pcall(function() component:Kill() end) then amplified = amplified + 1 end
+                                    AmpHealth[addr] = nil
+                                elseif pcall(function() component:SetHealthPercent(wanted) end) then
+                                    AmpHealth[addr] = wanted
+                                    amplified = amplified + 1
+                                else
+                                    AmpHealth[addr] = hp
+                                end
+                            else
+                                -- First sighting, or healed/unchanged: just re-baseline.
+                                AmpHealth[addr] = hp
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for addr in pairs(AmpHealth) do
+        if not seen[addr] then AmpHealth[addr] = nil end
+    end
+    return amplified
 end
 
 -- Executes one one-shot action. Returns (done, result): done=false means a precondition (an
@@ -425,12 +651,46 @@ local function RunAction(name, arg, ctx)
         if not crafting then return false, "waiting for crafting subsystem" end
         local ok, err = pcall(function() crafting:UnlockAllCraftingRecipes() end)
         return true, ok and "ok: all crafting recipes unlocked" or ("failed: " .. tostring(err))
-    elseif name == "addAllIngredients" then
-        local crafting = FindValid(GetCraftingSubsystem)
-        if not crafting then return false, "waiting for crafting subsystem" end
-        if not n or n < 1 or n > 10 then return true, "failed: amount out of range" end
-        local ok, err = pcall(function() crafting:AddIngredientsForAllCraftingRecipes(math.floor(n)) end)
-        return true, ok and string.format("ok: ingredients for %dx every recipe added", math.floor(n)) or ("failed: " .. tostring(err))
+    elseif name == "dumpItemNames" then
+        -- The app's item catalogs are keyed by asset path, which reads nothing like the in-game
+        -- name. Localized names live in ItemName (an FText) on the loaded data assets, and the
+        -- .locres they come from is packed inside the game's .pak - so log them from here and
+        -- rebuild the catalog labels from UE4SS.log.
+        local dumped = DumpNewItemNames()
+        return true, string.format("ok: %d new names logged (%d this session)", dumped, LoggedItemNameCount)
+    elseif name == "selfCheck" then
+        local missing = {}
+        local checked = 0
+        for _, className in ipairs(SELF_CHECK_CLASSES) do
+            checked = checked + 1
+            local ok, object = pcall(FindFirstOf, className)
+            if not ok or not object or not SafeIsValid(object) then
+                table.insert(missing, "class " .. className)
+            end
+        end
+        for _, objectPath in ipairs(SELF_CHECK_OBJECTS) do
+            checked = checked + 1
+            local ok, object = pcall(function() return StaticFindObject(objectPath) end)
+            if not ok or not object then table.insert(missing, objectPath) end
+        end
+        for _, entry in ipairs(missing) do
+            print("[DawnwalkerModBridge] SelfCheck MISSING: " .. entry)
+        end
+        -- Item counts are the early warning for a content patch: the catalogs are built from a
+        -- snapshot of these, so a changed number means they need regenerating.
+        local counts = {}
+        for _, className in ipairs(ITEM_NAME_DUMP_CLASSES) do
+            local listOk, assets = pcall(FindAllOf, className)
+            local n = (listOk and assets) and #assets or 0
+            table.insert(counts, className .. "=" .. n)
+        end
+        print("[DawnwalkerModBridge] SelfCheck items: " .. table.concat(counts, " "))
+        print(string.format("[DawnwalkerModBridge] SelfCheck: %d checked, %d missing", checked, #missing))
+        if #missing == 0 then
+            return true, string.format("ok: all %d reflection targets resolved", checked)
+        end
+        return true, string.format("failed: %d of %d missing (%s)", #missing, checked,
+            table.concat(missing, ", "):sub(1, 300))
     elseif name == "unlockAllFastTravel" then
         local journal = FindValid(GetOpenWorldJournal)
         if not journal then return false, "waiting for open world journal" end
@@ -451,37 +711,10 @@ local function RunAction(name, arg, ctx)
         if not fnOk or not fn or not SafeIsValid(fn) then return true, "failed: RevealAllMappins not found" end
         local ok, err = pcall(function() fn(journal) end)
         return true, ok and "ok: all map pins revealed" or ("failed: " .. tostring(err))
-    elseif name == "killTarget" then
-        if ctx.combatSettling or ctx.componentSettling or not ctx.combat then return false, "waiting for combat component" end
-        local targetOk, target = pcall(function() return ctx.combat:GetTargetedEnemy() end)
-        if not targetOk then return true, "failed: " .. tostring(target) end
-        if not target or not SafeIsValid(target) then return true, "failed: no enemy targeted (lock on first)" end
-        local addrOk, addr = pcall(function() return target:GetAddress() end)
-        if not addrOk then return true, "failed: could not resolve target" end
-        local killed = KillCombatComponentsOwnedBy({ [addr] = true }, nil)
-        return true, killed > 0 and "ok: target killed" or "failed: target has no combat component"
     elseif name == "killAllAggressive" then
         if ctx.combatSettling or not ctx.player then return false, "waiting for player to settle" end
-        local combatSubsystem = FindValid(GetCombatSubsystem)
-        if not combatSubsystem then return false, "waiting for combat subsystem" end
-        local actorsOk, actors = pcall(function() return combatSubsystem:GetAllAggressiveNPCActors() end)
-        if not actorsOk then return true, "failed: " .. tostring(actors) end
-        if type(actors) ~= "table" then return true, "ok: no aggressive enemies" end
-        local addresses = {}
-        local count = 0
-        for _, param in ipairs(actors) do
-            -- TArray elements arrive as RemoteUnrealParam wrappers (:get() yields the actor); fall
-            -- back to treating the element as the actor itself if this UE4SS build differs.
-            local getOk, actor = pcall(function() return param:get() end)
-            if not getOk or not actor then actor = param end
-            if actor and SafeIsValid(actor) then
-                local addrOk, addr = pcall(function() return actor:GetAddress() end)
-                if addrOk then
-                    addresses[addr] = true
-                    count = count + 1
-                end
-            end
-        end
+        local addresses, count = GetAggressiveNpcAddresses()
+        if not addresses then return false, "waiting for combat subsystem" end
         if count == 0 then return true, "ok: no aggressive enemies" end
         local playerAddrOk, playerAddr = pcall(function() return ctx.player:GetAddress() end)
         local killed = KillCombatComponentsOwnedBy(addresses, playerAddrOk and playerAddr or nil)
@@ -559,13 +792,6 @@ local MovementSettleTicksRemaining = 0
 -- address-based settle window had already expired and gave zero protection. This counter
 -- gates on that transition directly, whatever caused it.
 local CombatComponentSettleTicksRemaining = 0
--- The damage-multiplier write touches 13 separate GAS attributes in one go (heavier than the
--- simple Lock/SetPercent calls CombatComponentSettleTicksRemaining already protects) - crashes
--- kept recurring at the exact same point (right after this write's first-ever invocation) even
--- after lowering the multiplier and hard-capping the written values, so give this specific write
--- its own longer, independent settle window rather than assuming the general combat-component
--- settle window (3 ticks) is long enough for it too.
-local DamageMultiplierSettleTicksRemaining = 0
 local function RefreshPawnSettleState()
     local playerOk, player = pcall(UEHelpers.GetPlayer)
     if not playerOk or not player or not SafeIsValid(player) then return nil end
@@ -590,11 +816,11 @@ local function RefreshPawnSettleState()
         -- CheatManagerEnablerMod logs "Constructed CheatManager" on every respawn, meaning the
         -- native God() toggle from the old CheatManager instance doesn't carry over either.
         WasNativeGodModeApplied = false
-        -- New pawn means a fresh attribute set at its real default - force a re-apply rather than
-        -- assuming the old pawn's value (or lack of one) still matches.
-        LastAppliedDamageMultiplier = nil
-        -- Per-pawn state for the newer toggles: the movement mode (Fly/Ghost/Walk) is pawn
-        -- state, the blood lock and RPG difficulty may be reset by the game on level load.
+        -- New pawn means fresh per-pawn state for the newer toggles: the movement mode
+        -- (Fly/Ghost/Walk) is pawn state, the blood lock and RPG difficulty may be reset by the
+        -- game on level load, and the action-slot override belongs to the old pawn's component.
+        WasActionSlotsOverridden = false
+        AmpHealth = {}
         LastAppliedMovementMode = nil
         LastAppliedRPGDifficulty = nil
         WasBloodLocked = false
@@ -607,128 +833,6 @@ local function RefreshPawnSettleState()
         end
     end
     return player
-end
-
--- Same raw-GAS-struct-write technique already proven safe for Health (ForceDirectHealthAttribute)
--- and behind the game's own AttackXCostReductionPercentage naming, these are the actual per-attack
--- damage output scalars - covers the player's melee, claw, unarmed, and magic attacks so any
--- weapon/ability the player uses benefits. Cached per-attribute base value (via the shared
--- BaseValues table, cleared on every respawn) so repeated ticks don't compound the multiplier.
-local DAMAGE_MULTIPLIER_ATTRS = { "MeleeDamageMultiplier", "ClawsDamageMultiplier", "UnarmedDamageMultiplier", "MagicDamageMultiplier" }
-local DamageMultiplierDiagLogCount = 0
-local LastAppliedDamageMultiplier = nil
-
--- Diagnostics (2026-09-03) showed these hold their real per-hit magnitude (hundreds) in
--- CurrentValue while BaseValue stays 0 - some other system (the equipped weapon, most likely)
--- drives CurrentValue via a GameplayEffect modifier, unlike the near-inert 0/0 XDamageMultiplier
--- attrs above. Skipped: BaseUnarmedDamage/BaseMagicDamage/Damage/DealtDamage/HybridDamage, which
--- read 0.0 even in CurrentValue (nothing to multiply).
-local BASE_DAMAGE_VALUE_ATTRS = {
-    "WeaponDamageMin", "WeaponDamageMax", "BaseMeleeDamage",
-    "BaseUnarmedDamageMin", "BaseUnarmedDamageMax",
-    "BaseClawsDamageMin", "BaseClawsDamageMax",
-    "BaseAbilityDamage", "BaseVampireAbilityDamage"
-}
-
-local function ApplyDamageMultiplier(player, multiplier)
-    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
-    if not ascOk or not asc or not SafeIsValid(asc) then return end
-    if not CharacterAttributeSetClass or not SafeIsValid(CharacterAttributeSetClass) then
-        local classOk, class = pcall(function()
-            return StaticFindObject("/Script/DogwoodStats.CharacterBaseAttributeSet")
-        end)
-        if classOk and class then CharacterAttributeSetClass = class end
-    end
-    if not CharacterAttributeSetClass then return end
-    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(CharacterAttributeSetClass) end)
-    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return end
-
-    local diagLog = DamageMultiplierDiagLogCount < 10
-    if diagLog then DamageMultiplierDiagLogCount = DamageMultiplierDiagLogCount + 1 end
-
-    for _, attrName in ipairs(DAMAGE_MULTIPLIER_ATTRS) do
-        local cacheKey = "dmgMult_" .. attrName
-        if BaseValues[cacheKey] == nil then
-            -- Don't gate on base > 0: if the game's real default for these is 0 (an additive
-            -- "no bonus" convention rather than a 1.0 "neutral multiplier" convention), that
-            -- gate would silently never cache anything and this whole feature would be a no-op.
-            local readOk, base = pcall(function() return attrSet[attrName].BaseValue end)
-            if readOk and base ~= nil then BaseValues[cacheKey] = base end
-        end
-        local base = BaseValues[cacheKey]
-        local writeOk
-        if base then
-            -- Diagnostics (2026-09-03) showed these read 0.0 by default, not 1.0 - the game
-            -- treats them as an additive "extra damage" bonus on top of the weapon's own damage,
-            -- not a scalar multiplier. Convert our 1x-is-neutral slider value into that convention:
-            -- multiplier=1 -> +0 (no change), multiplier=10 -> +9 (base damage plus 900%).
-            -- Hard-capped at 200 regardless of multiplier (defense-in-depth, see repo memory) -
-            -- extreme absolute values here are the leading crash suspect, not the multiplier
-            -- itself.
-            local bonus = math.min(base + (multiplier - 1), 200)
-            writeOk = pcall(function()
-                attrSet[attrName].CurrentValue = bonus
-                attrSet[attrName].BaseValue = bonus
-            end)
-        end
-        if diagLog then
-            print(string.format(
-                "[DawnwalkerModBridge] DamageMultiplier diag: %s base=%s multiplier=%s writeOk=%s",
-                attrName, tostring(base), tostring(multiplier), tostring(writeOk)))
-        end
-    end
-
-    for _, attrName in ipairs(BASE_DAMAGE_VALUE_ATTRS) do
-        local cacheKey = "dmgBaseVal_" .. attrName
-        if BaseValues[cacheKey] == nil then
-            -- Cache CurrentValue (not BaseValue, which is 0 here) as the multiplication anchor.
-            local readOk, current = pcall(function() return attrSet[attrName].CurrentValue end)
-            if readOk and current ~= nil and current > 0 then BaseValues[cacheKey] = current end
-        end
-        local base = BaseValues[cacheKey]
-        local writeOk
-        if base then
-            -- Real per-hit damage magnitude, so a genuine scalar multiply is the right convention
-            -- here (unlike the additive bonus used for the 0-based XDamageMultiplier attrs above).
-            -- Hard-capped at 20000 regardless of multiplier (defense-in-depth, see repo memory) -
-            -- extreme absolute values here are the leading crash suspect, not the multiplier itself.
-            writeOk = pcall(function() attrSet[attrName].CurrentValue = math.min(base * multiplier, 20000) end)
-        end
-        if diagLog then
-            print(string.format(
-                "[DawnwalkerModBridge] DamageValue diag: %s base=%s multiplier=%s writeOk=%s",
-                attrName, tostring(base), tostring(multiplier), tostring(writeOk)))
-        end
-    end
-end
-
--- Read-only, independent of ApplyDamageMultiplier's write cadence - lets us see whether the raw
--- write actually holds over time or gets silently reverted (e.g. by the ASC's own aggregator
--- recalculating CurrentValue from BaseValue + active GameplayEffect modifiers on some other
--- trigger), since the game showing no extra damage despite writeOk=true could mean either the
--- write isn't read by the damage formula at all, or it's read but doesn't stay set.
-local function ReadDamageMultiplierLiveValue(player)
-    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
-    if not ascOk or not asc or not SafeIsValid(asc) then return nil end
-    if not CharacterAttributeSetClass or not SafeIsValid(CharacterAttributeSetClass) then return nil end
-    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(CharacterAttributeSetClass) end)
-    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return nil end
-    local currentOk, currentVal = pcall(function() return attrSet.MeleeDamageMultiplier.CurrentValue end)
-    local baseOk, baseVal = pcall(function() return attrSet.MeleeDamageMultiplier.BaseValue end)
-    return currentOk and currentVal or nil, baseOk and baseVal or nil
-end
-
--- Same steady-hold check as ReadDamageMultiplierLiveValue, but for one of the real damage-
--- magnitude attrs (unlike MeleeDamageMultiplier, this one is actively GE-driven at rest, so it's
--- not yet confirmed our direct write survives whatever recomputes it).
-local function ReadWeaponDamageLiveValue(player)
-    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
-    if not ascOk or not asc or not SafeIsValid(asc) then return nil end
-    if not CharacterAttributeSetClass or not SafeIsValid(CharacterAttributeSetClass) then return nil end
-    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(CharacterAttributeSetClass) end)
-    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return nil end
-    local currentOk, currentVal = pcall(function() return attrSet.WeaponDamageMax.CurrentValue end)
-    return currentOk and currentVal or nil
 end
 
 local function ApplyCommand()
@@ -786,6 +890,24 @@ local function ApplyCommand()
         movementSettling = true
     end
     status.cutsceneActive = 0
+
+    -- Passive item-name capture: only while a menu is open, which is both when the game has
+    -- resolved those names and when it isn't busy. Once per menu visit, not once per tick.
+    if inWorld then
+        local menuOpen = IsMenuOpen()
+        if menuOpen and not MenuScanDone then
+            MenuScanDone = true
+            local found = DumpNewItemNames()
+            if found > 0 then
+                print(string.format("[DawnwalkerModBridge] Menu scan captured %d new item names (%d this session)",
+                    found, LoggedItemNameCount))
+            end
+        elseif not menuOpen then
+            MenuScanDone = false
+        end
+        status.itemNamesLogged = LoggedItemNameCount
+        status.menuOpen = menuOpen and 1 or 0
+    end
 
     local settings = GetSettings()
     if settings and SafeIsValid(settings) then
@@ -962,7 +1084,6 @@ local function ApplyCommand()
                 print("[DawnwalkerModBridge] Combat component found for player")
                 WasCombatFound = true
                 CombatComponentSettleTicksRemaining = 3
-                DamageMultiplierSettleTicksRemaining = 10
             end
             status.combatFound = 1
             local componentSettling = CombatComponentSettleTicksRemaining > 0
@@ -975,9 +1096,6 @@ local function ApplyCommand()
                 -- cutscene), the exact same hazard class as a freshly-spawned pawn.
                 CombatComponentSettleTicksRemaining = CombatComponentSettleTicksRemaining - 1
             else
-                if DamageMultiplierSettleTicksRemaining > 0 then
-                    DamageMultiplierSettleTicksRemaining = DamageMultiplierSettleTicksRemaining - 1
-                end
             -- SetHealthPercent(1.0) alone only corrects health once per poll (1s); combat damage
             -- lands in real time and can still kill the player in the gap between polls. LockHealth
             -- freezes the stat against damage entirely, which is what actually stops death - the
@@ -1014,50 +1132,21 @@ local function ApplyCommand()
                 print("[DawnwalkerModBridge] UnlockStamina failed: " .. tostring(unlockStaminaErr))
                 ReportedUnlockStaminaError = true
             end
-            if command.damageMultiplier then
-                local dmgMult = tonumber(command.damageMultiplier)
-                -- Lowered from 50 to 10 (2026-09-04): every crash correlated with this feature in
-                -- the native-mod testing session had damageMultiplier=50 active, and the resulting
-                -- raw-written attribute values at 50x were extreme (e.g. 724 base * 50 = 36200,
-                -- vs a real per-hit magnitude in the hundreds) - a plausible trigger for whatever
-                -- downstream system (damage-number UI, overkill/gib logic, etc.) reads these
-                -- values next. 10x still gives a very noticeable damage boost with far less
-                -- extreme absolute numbers.
-                if dmgMult and dmgMult >= 0.1 and dmgMult <= 10 then
-                    -- Unlike health/stamina, nothing fights this value back tick-to-tick - only
-                    -- touch the raw struct when the pawn is new or the requested value actually
-                    -- changed, instead of every 1s poll, to cut exposure to this write's crash risk.
-                    if dmgMult ~= LastAppliedDamageMultiplier and DamageMultiplierSettleTicksRemaining <= 0 then
-                        -- Same raw-struct-write hazard as ForceDirectHealthAttribute: bypasses all
-                        -- engine-side validity checks, so skip it once the game considers the
-                        -- character dead (fail-open on error, same as the health path).
-                        local aliveOk, isAlive = pcall(function() return combat:IsAlive() end)
-                        if not (aliveOk and isAlive == false) then
-                            ApplyDamageMultiplier(player, dmgMult)
-                            LastAppliedDamageMultiplier = dmgMult
-                        end
-                    end
-                    status.damageMultiplierApplied = 1
-                else
-                    status.damageMultiplierApplied = 0
-                    status.damageMultiplierRejected = "out_of_range"
-                end
+            local amplifier = tonumber(command.damageAmplifier)
+            if amplifier and amplifier > 1 and amplifier <= 20 then
+                SharedAmplifier = amplifier
+                status.damageAmplified = LastAmplifiedCount
+            else
+                SharedAmplifier = 1
+                status.damageAmplified = 0
             end
-            -- Read-only check every tick, independent of the write-on-change gate above, so we
-            -- can see in status.txt/UE4SS.log whether the value drifts back down on its own.
-            local liveCurrent, liveBase = ReadDamageMultiplierLiveValue(player)
-            status.damageMultiplierLiveCurrent = liveCurrent
-            status.damageMultiplierLiveBase = liveBase
-            status.weaponDamageMaxLiveCurrent = ReadWeaponDamageLiveValue(player)
-            -- Keep ability activation charges full. Same raw GAS write hazard class as the
-            -- health write, so it copies the same IsAlive() death guard (fail-open on error).
+            -- Ability activation charges: SetSlotsChargedOverride is the game's own supported
+            -- override, replacing a raw ChargedActionSlots struct write.
             if command.keepActionSlotsCharged == "1" then
-                local aliveOk, isAlive = pcall(function() return combat:IsAlive() end)
-                if not (aliveOk and isAlive == false) then
-                    status.actionSlotsCharged = ForceActionSlotsCharged(player) and 1 or 0
-                else
-                    status.actionSlotsCharged = 0
-                end
+                status.actionSlotsCharged = ApplyActionSlotsOverride(player, true) and 1 or 0
+            elseif WasActionSlotsOverridden then
+                ApplyActionSlotsOverride(player, false)
+                status.actionSlotsCharged = 0
             end
             status.healthLocked = (lockHealthOk == true) and 1 or 0
             status.staminaLocked = (lockStaminaOk == true) and 1 or 0
@@ -1065,11 +1154,6 @@ local function ApplyCommand()
             local stOk, st = pcall(function() return combat:GetStaminaPercentage() end)
             status.healthPercent = hpOk and hp or "unknown"
             status.staminaPercent = stOk and st or "unknown"
-            -- REAL FIX ATTEMPT #6 diagnostics: raw GAS attribute values written by the fast
-            -- loop's ForceDirectHealthAttribute, separate from the (possibly-derived) values above.
-            status.rawHealth = LastRawHealth
-            status.rawMaxHealth = LastRawMaxHealth
-            status.directHealthWriteOk = LastDirectHealthWriteOk
             end
         else
             WasCombatFound = false
@@ -1178,27 +1262,6 @@ local function ApplyCommand()
             end
         end
         status.nativeGodModeApplied = WasNativeGodModeApplied and 1 or 0
-
-        -- The stat-based Damage Multiplier writes successfully and holds steady (confirmed via
-        -- ReadDamageMultiplierLiveValue/ReadWeaponDamageLiveValue) but has never been shown to
-        -- affect real combat damage in this game - the actual damage calculation appears to read
-        -- from somewhere else entirely (see repo memory's extensive "DAMAGE MULTIPLIER" saga).
-        -- DamageTarget is the engine's own stock CheatManager function (bound to the "damage"
-        -- console command in any UE game) - it traces to whatever the player is currently aiming
-        -- at and applies real damage through the actual damage pipeline, guaranteed to work since
-        -- it's not a custom Dogwood attribute, it's stock Unreal Engine cheat functionality.
-        local nukeRequestId = command.nukeRequestId
-        if nukeRequestId and nukeRequestId ~= LastNukeRequestId then
-            LastNukeRequestId = nukeRequestId
-            local amount = tonumber(command.nukeDamage)
-            if amount and amount > 0 and amount <= 999999 then
-                local dmgOk, dmgErr = pcall(function() cheatManager:DamageTarget(amount) end)
-                LastNukeTargetResult = dmgOk and "ok" or ("failed: " .. tostring(dmgErr))
-            else
-                LastNukeTargetResult = "failed: out_of_range"
-            end
-        end
-        status.nukeTargetResult = LastNukeTargetResult
 
         -- Stock UE movement-mode cheats. Pawn state, so re-applied after every respawn (the
         -- LastAppliedMovementMode reset in RefreshPawnSettleState) and gated behind the movement
@@ -1481,107 +1544,51 @@ end
 -- 10x. Doesn't fix a one-shot kill that exceeds max health in a single hit, but should cover
 -- ordinary sustained combat damage. Kept separate from ApplyCommand/StartTickLoop so it
 -- doesn't add the file-read and settings/level/camera work to this hot path.
-local function ForceDirectHealthAttribute(player)
-    local ascOk, asc = pcall(function() return player.AbilitySystemComponent end)
-    if not ascOk or not asc or not SafeIsValid(asc) then return end
-
-    if not CharacterAttributeSetClass or not SafeIsValid(CharacterAttributeSetClass) then
-        local classOk, class = pcall(function()
-            return StaticFindObject("/Script/DogwoodStats.CharacterBaseAttributeSet")
-        end)
-        if classOk and class then CharacterAttributeSetClass = class end
-    end
-    if not CharacterAttributeSetClass then return end
-
-    local attrSetOk, attrSet = pcall(function() return asc:GetAttributeSet(CharacterAttributeSetClass) end)
-    if not attrSetOk or not attrSet or not SafeIsValid(attrSet) then return end
-
-    local readOk, maxHealth = pcall(function() return attrSet.MaxHealth.CurrentValue end)
-    if not readOk or not maxHealth or maxHealth <= 0 then return end
-
-    local currentOk, currentHealth = pcall(function() return attrSet.Health.CurrentValue end)
-    LastRawHealth = currentOk and currentHealth or "unknown"
-    LastRawMaxHealth = maxHealth
-
-    -- Log the first few raw readings unconditionally - this is the evidence that confirms or
-    -- refutes the "SetHealthPercent is a derived value" theory on the next live combat test.
-    if DirectHealthDiagLogCount < 10 then
-        DirectHealthDiagLogCount = DirectHealthDiagLogCount + 1
-        print(string.format("[DawnwalkerModBridge] Raw GAS health: current=%s max=%s",
-            tostring(LastRawHealth), tostring(LastRawMaxHealth)))
-    end
-
-    local writeOk, writeErr = pcall(function()
-        attrSet.Health.CurrentValue = maxHealth
-        attrSet.Health.BaseValue = maxHealth
-    end)
-    LastDirectHealthWriteOk = writeOk and 1 or 0
-    if not writeOk and not ReportedDirectHealthWriteError then
-        print("[DawnwalkerModBridge] Direct Health attribute write failed: " .. tostring(writeErr))
-        ReportedDirectHealthWriteError = true
-    end
-end
-
-local function StartFastHealthStaminaLoop()
-    -- ROOT CAUSE (2026-09-03): this loop only ever read the shared CombatSettleTicksRemaining
-    -- counter, which is exclusively refreshed by RefreshPawnSettleState - itself only called from
-    -- the slower 1000ms ApplyCommand loop. For up to ~1s after every respawn (until the next slow
-    -- tick notices the pawn address changed), this counter is stale/zero, so this 100ms loop kept
-    -- scanning/writing the brand-new pawn's combat component completely unguarded. Isolation
-    -- testing (disabling this loop entirely stopped a crash that survived removing every other
-    -- suspect) confirmed this race is live. Fix: track address changes independently here too, on
-    -- this loop's own schedule, so the gate reacts within one 100ms tick instead of waiting on
-    -- the other loop.
-    local fastLoopLastAddress = nil
-    local fastLoopSettleTicksRemaining = 0
+-- The amplifier only reacts to damage the game has already dealt, so its poll interval IS the
+-- delay before the bonus lands - it gets its own 100ms loop instead of riding the 1s tick.
+-- Deliberately does NOT read the shared settle counters: a fast loop reading counters that only
+-- the slow loop writes is exactly what caused the 2026-09-03 crash saga, so it tracks the pawn
+-- address and settles itself. Reads SharedAmplifier rather than command.txt to keep file I/O off
+-- this path, and skips the world scan entirely whenever nothing is hostile.
+local function StartDamageAmplifierLoop()
     pcall(function()
         LoopAsync(100, function()
             local ok, err = pcall(function()
-                local playerOk, player = pcall(UEHelpers.GetPlayer)
-                if not playerOk or not player or not SafeIsValid(player) then return end
-                local addrOk, address = pcall(function() return player:GetAddress() end)
-                if addrOk then
-                    if address ~= fastLoopLastAddress then
-                        fastLoopLastAddress = address
-                        fastLoopSettleTicksRemaining = 30 -- 30 * 100ms = 3s, own independent gate
-                    elseif fastLoopSettleTicksRemaining > 0 then
-                        fastLoopSettleTicksRemaining = fastLoopSettleTicksRemaining - 1
-                    end
+                if SharedAmplifier <= 1 then
+                    if next(AmpHealth) ~= nil then AmpHealth = {} end
+                    return
                 end
-                if fastLoopSettleTicksRemaining > 0 then return end
-                if CombatSettleTicksRemaining > 0 then return end
                 if CutsceneActive then return end
-                if not AppConnected then return end
-                local command = ReadCommandFile()
-                if not IsHandshaken(command) then return end
-                local combat = GetPlayerCombatComponent(player)
-                if not combat or not SafeIsValid(combat) then return end
-                -- Screenshot evidence (2026-09-03) showed a fatal crash dump written at the exact
-                -- instant of a death screen - our raw attribute write in ForceDirectHealthAttribute
-                -- bypasses all engine-side validity checks, so it's a plausible cause if it fires
-                -- while the character is already being torn down for death. Skip all health/stamina
-                -- writes once the game itself considers the character dead (fail-open on error so a
-                -- broken IsAlive() call doesn't silently disable protection during normal combat).
-                local aliveOk, isAlive = pcall(function() return combat:IsAlive() end)
-                if aliveOk and isAlive == false then return end
-                if command.infiniteHealth == "1" then
-                    pcall(function() combat:SetHealthPercent(1.0) end)
-                    ForceDirectHealthAttribute(player)
+
+                local playerOk, player = pcall(UEHelpers.GetPlayer)
+                if not playerOk or not player or not SafeIsValid(player) then
+                    AmpLoopLastPawnAddress = nil
+                    return
                 end
-                if command.infiniteStamina == "1" then
-                    pcall(function() combat:SetStaminaPercent(1.0) end)
+                local addrOk, addr = pcall(function() return player:GetAddress() end)
+                if not addrOk then return end
+                if addr ~= AmpLoopLastPawnAddress then
+                    AmpLoopLastPawnAddress = addr
+                    AmpLoopSettleTicks = 30
+                    if next(AmpHealth) ~= nil then AmpHealth = {} end
+                    return
                 end
+                if AmpLoopSettleTicks > 0 then
+                    AmpLoopSettleTicks = AmpLoopSettleTicks - 1
+                    return
+                end
+                LastAmplifiedCount = AmplifyDamageToAggressiveNPCs(player, SharedAmplifier)
             end)
             if not ok then
-                print("[DawnwalkerModBridge] Fast health/stamina loop error: " .. tostring(err))
+                print("[DawnwalkerModBridge] Damage amplifier error: " .. tostring(err))
             end
             return false
         end)
     end)
 end
-StartFastHealthStaminaLoop()
 
 StartTickLoop()
+StartDamageAmplifierLoop()
 
 pcall(ApplyCommand)
 print("[DawnwalkerModBridge] Loaded. Watching " .. COMMAND_PATH)

@@ -39,14 +39,13 @@ This keeps the renderer constrained to a safe request/response interface.
 - `applyJumpMultiplier(mult)`
 - `applyFovMultiplier(mult)`
 - `applyGameSpeed(speed)`
-- `applyDamageMultiplier(mult)`
+- `applyDamageAmplifier(value)`
 - `applyBridgeField(key, value)`
 - `applyBridgePreset(values)`
 
 ### One-shot actions
 
 - `runBridgeAction(name, arg)`
-- `nukeTarget(amount)`
 
 ### Native mod operations
 
