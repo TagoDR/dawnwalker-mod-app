@@ -432,7 +432,7 @@ function resolveCachedGameRoot() {
 function getBridgePaths() {
   const gameRoot = resolveCachedGameRoot();
   if (!gameRoot) return null;
-  const modsDir = path.join(gameRoot, "Binaries", "Win64", "Mods");
+  const modsDir = path.join(gameRoot, "Binaries", "Win64", "ue4ss", "Mods");
   const bridgeDir = path.join(modsDir, "DawnwalkerModBridge");
   return {
     gameRoot,
