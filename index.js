@@ -180,7 +180,9 @@ function inspectRuntimeLoader(gameRoot) {
   const markerNames = ["UE4SS.dll", "UE4SS-settings.ini", "UE4SS.log"];
   const foundMarkers = markerNames.filter((name) => fs.existsSync(path.join(loaderRoot, name)));
   const modDirectories = ["Mods", "~mods"].filter((name) => (
-    fs.existsSync(path.join(binaryRoot, name)) || fs.existsSync(path.join(gameRoot, name))
+    fs.existsSync(path.join(loaderRoot, name))
+    || fs.existsSync(path.join(binaryRoot, name))
+    || fs.existsSync(path.join(gameRoot, name))
   ));
 
   return {
@@ -429,10 +431,23 @@ function resolveCachedGameRoot() {
   return cachedGameRoot;
 }
 
+// UE4SS 3.1+ installs into Binaries/Win64/ue4ss/Mods; older builds use Binaries/Win64/Mods.
+// Falls back to the legacy path so callers can report "UE4SS is missing" instead of failing as
+// if the game install itself was not found.
+function resolveModsDir(gameRoot) {
+  const candidates = [
+    path.join(gameRoot, "Binaries", "Win64", "ue4ss", "Mods"),
+    path.join(gameRoot, "Binaries", "Win64", "Mods"),
+    path.join(gameRoot, "Mods"),
+  ];
+  return candidates.find((dir) => fs.existsSync(dir)) || candidates[1];
+}
+
 function getBridgePaths() {
   const gameRoot = resolveCachedGameRoot();
   if (!gameRoot) return null;
-  const modsDir = path.join(gameRoot, "Binaries", "Win64", "Mods");
+
+  const modsDir = resolveModsDir(gameRoot);
   const bridgeDir = path.join(modsDir, "DawnwalkerModBridge");
   return {
     gameRoot,
@@ -650,7 +665,7 @@ const nativeFixDllSource = path.join(__dirname, "native-mods", "dist", "Dawnwalk
 function getNativeFixPaths() {
   const gameRoot = resolveCachedGameRoot();
   if (!gameRoot) return null;
-  const modsDir = path.join(gameRoot, "Binaries", "Win64", "Mods");
+  const modsDir = resolveModsDir(gameRoot);
   const modDir = path.join(modsDir, "DawnwalkerNativeFix");
   return {
     gameRoot,
