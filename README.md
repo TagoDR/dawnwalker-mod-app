@@ -1,172 +1,198 @@
-# Dawnwalker Mod App
+# DawnwalkerMod — In-Engine UE4SS Mod for The Blood of the Dawnwalker
 
-A Windows desktop utility for controlling supported gameplay tweaks in The Blood of Dawnwalker through a live UE4SS bridge.
+A 100% in-engine, pure UE4SS mod for **The Blood of the Dawnwalker**.
 
-This project is designed around a simple principle: only expose settings and actions that are known to be valid, and apply them only when the game is in a safe state. It avoids stale command replay, resets itself to defaults on shutdown, and focuses on real runtime-supported behavior instead of speculative or unsupported feature plumbing.
+This mod replaces the legacy Electron desktop application and file-polling bridge with a native, zero-latency mod that runs directly inside Unreal Engine via **UE4SS**. It features an in-game interactive Canvas/HUD menu, configurable hotkeys, and a complete suite of console commands.
 
-## Why this exists
+No external `.exe` binaries, no Node.js runtime, no file-polling lag.
 
-The app was built to make gameplay tuning safer and more predictable:
+---
 
-- start from default game behavior instead of carrying old UI state across sessions
-- ignore stale commands from previous boots
-- avoid writing to the game during unsafe states such as cutscenes
-- reset to defaults when the app closes so the game does not remain stuck in a modified state
-- validate every field before sending it to the bridge
+## Features
 
-This makes the project more of a controlled runtime control panel than a broad cheat menu.
+### 1. Survivability & Combat
+- **Infinite Health (God Mode)**: Multi-layered protection (`RebelAISubsystem` player invulnerability, GAS `GE_Invulnerability` gameplay effect, engine `CheatManager:God()`, and `CombatComponentBase:LockHealth()`). Gated behind post-respawn settle windows to prevent crashes.
+- **Infinite Stamina & Infinite Blood**: Locks stamina and the vampire blood bar at 100%.
+- **Heal & Replenish Blood**: Instant one-click or hotkey recovery for health, stamina, and all blood segments.
+- **Damage Amplifier**: Watches each hostile enemy's health and scales the drop dealt by the player (1x–20x) in a dedicated 100ms loop.
+- **Kill Hostiles**: Instantly eliminates all currently aggressive NPCs.
+- **Difficulty Adjustments**: Live control over Action (Combat) and RPG (Exploration) difficulty tiers (`Story`, `Normal`, `Immersive`, `Hard`).
 
-## What it does
+### 2. Character Progression
+- **Set Player Level**: Safely forces level from 1 to 99 (levels above 99 exceed engine XP tables and are rejected).
+- **Level Cap Adjustment**: Sets runtime level cap (1 to 99).
+- **Quest XP Granting**: Triggers real quest reward tiers (1: Very Small to 5: Very Large), properly unlocking normal game milestones.
 
-The app communicates with a Lua runtime bridge that reads a simple command file and writes a status file back to the game mod environment, plus a native C++ UE4SS mod for the things Lua cannot do. Through those, it can manage a curated set of in-game settings and one-shot actions, including:
+### 3. Movement & Camera
+- **Speed & Jump Multipliers**: Smoothly scales `MaxWalkSpeed` and `JumpZVelocity` (0.1x to 5.0x) from cached base values.
+- **Movement Modes**: Toggle between `Walk`, `Fly`, and `Ghost` (noclip fly) cheat modes.
+- **Teleport**: Instantly teleports player pawn to aim crosshair.
+- **Field of View (FOV)**: Custom FOV scaling clamped between 10° and 170°.
+- **Game Speed (Slomo)**: Scales game time dilation from 0.1x to 4.0x.
 
-- health, stamina, and blood toggles
-- movement speed, jump strength, FOV, and movement mode changes
-- game speed and difficulty values
-- carry weight adjustment and a damage amplifier
-- progression helpers such as XP, trait points, mutation charges, and level cap adjustments
-- item granting: every weapon, armor set, armor piece, ring, amulet, consumable and crafting ingredient in the game, each with a selectable amount
-- recipe unlocking
-- map reveal, fast-travel unlock, and time-of-day actions
-- utility actions like heal, refill blood, clear hostile enemies, and teleport
+### 4. Skills & Abilities
+- **Trait Points**: Add, remove, or set exact unspent trait points.
+- **Trait Tree**: One-click full tree unlock (`UnlockAllTraits`) or full respec (`ResetAllTraits`).
+- **Vampire Mutation**: Add or remove vampire corruption / mutation charges.
+- **No Cooldowns**: Eliminates ability cooldowns via `FocusAbilitiesSubsystem`.
+- **Action Slots Full**: Automatically refills unlocked ability activation charges.
 
-The app intentionally rejects unknown settings and invalid input, and the bridge enforces additional runtime safety checks before applying changes.
+### 5. World & Time
+- **In-Game Clock**: Set exact time of day (`HH:MM`) or advance time by hours.
+- **Map & Fast Travel**: Unlock all fast travel destinations and reveal all map pins / POIs.
+- **Debug Overrides**: Adjust world NPC level override (0–99) and alert level (0–9).
 
-### Why a native mod as well as Lua
+### 6. Gear & Inventory
+- **Gear Granting**: Over 800 items and sets cataloged:
+  - Complete 4-piece armor sets (equips automatically)
+  - Weapons (swords, greatswords, axes, maces, hammers, knives)
+  - Individual armor pieces (chest, legs, hands, feet)
+  - Rings, amulets, and trinkets
+  - Consumables and crafting ingredients
+  - Duplicate cleanup tools
+- **Economy**: Add or remove coins (`InventoryComponent:AddCurrency`).
+- **Carry Weight**: Multiplier up to 100x on carry weight limit.
+- **Crafting**: Unlock all crafting schematics in one click.
+- **Self-Check**: Diagnoses and verifies every Unreal Engine reflection target.
 
-Item granting requires the game's `FItemHandle` struct, which has no reflected fields and therefore cannot be marshalled through UE4SS's Lua layer at all. The native mod copies its raw bytes between reflection calls instead. Everything else — every toggle, action and status readout — runs through the Lua bridge.
+---
 
-### Damage amplifier
+## Installation
 
-The game's per-hit damage calculation could not be reached: it is not driven by any reachable attribute, and the Blueprint function that builds the damage effect cannot be hooked on this engine build. Rather than keep guessing, the amplifier works from the other side. It watches each hostile enemy's health and re-applies whatever drop the game just dealt, scaled by the chosen multiplier, so a normal hit lands as an Nx hit. It uses only the health functions that are confirmed to work on enemy combat components.
+### Requirements:
+- Windows PC
+- *The Blood of the Dawnwalker* installed
+- [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) (v3.0.1 or higher) installed in `Dawnwalker/Binaries/Win64/`
 
-## Safety model
+### Steps:
+1. Locate your game's UE4SS `Mods` folder (typically `The Blood of Dawnwalker/Dawnwalker/Binaries/Win64/Mods/`).
+2. Copy the contents of `runtime-mods/` into your `Mods/` folder:
+   - `Mods/DawnwalkerMod/` (the main script mod)
+   - `Mods/DawnwalkerNativeFix/` (the native C++ mod for item handle copying)
+   - Add `DawnwalkerMod : 1` and `DawnwalkerNativeFix : 1` to `Mods/mods.txt`.
+3. Launch the game!
 
-This project is intentionally conservative.
+---
 
-### Defaults-first behavior
-On launch, the app does not restore a stale last session state. Instead, it starts from the game’s normal defaults and only applies the user’s current configuration once the game is loaded and the bridge is ready.
+## Controls & Usage
 
-### Boot handshake / stale state protection
-The bridge uses a per-boot identifier and only trusts commands that match the current game session. Old command files from a previous run are ignored.
+### 1. In-Game Interactive Menu
+- Press **`F1`** to toggle the in-game mod menu overlay.
+- Use **`Tab`** to switch between categories (`Combat`, `Character`, `Movement`, `Skills`, `World`, `Gear`, `Presets`).
+- Use **`Up` / `Down` Arrow Keys** to highlight a setting or action.
+- Use **`Left` / `Right` Arrow Keys** to adjust sliders or cycle dropdowns.
+- Press **`Enter`** to toggle a cheat on/off or execute an action.
+- Mouse cursor is automatically enabled while the menu is open.
 
-### Cutscene and world-state checks
-Writes are paused during unsafe states to reduce the risk of applying changes while the game is transitioning, in dialogue, or otherwise not in a stable gameplay state.
+### 2. Quick Keybinds
+| Hotkey | Action |
+| :--- | :--- |
+| **`F1`** | Toggle In-Game Mod Menu |
+| **`NumPad 1`** | Instant Heal & Stamina Refill |
+| **`NumPad 2`** | Toggle Infinite Health (God Mode) |
+| **`NumPad 3`** | Toggle Infinite Stamina |
+| **`NumPad 4`** | Toggle Infinite Blood |
+| **`NumPad 5`** | Cycle Movement Mode (`Walk` -> `Fly` -> `Ghost`) |
+| **`NumPad 6`** | Teleport to Aim Crosshair |
+| **`NumPad 7`** | Kill All Aggressive Hostile NPCs |
+| **`NumPad 8`** | Toggle Ability Cooldowns |
+| **`NumPad 9`** | Advance Time 1 Hour |
 
-### Reset on shutdown
-When the app closes, it resets the live bridge state and restores defaults instead of leaving the game stuck with a persistent override.
+### 3. In-Game Console Commands
+Press the console key (**`~`**) in-game and type any of the following:
 
-### No raw attribute writes
+```text
+dw_menu                     - Toggle the in-game mod menu
+dw_god [0|1]                - Toggle or set God Mode / Infinite Health
+dw_stamina [0|1]            - Toggle or set Infinite Stamina
+dw_blood [0|1]              - Toggle or set Infinite Blood
+dw_heal                     - Restore health and stamina to 100%
+dw_refillblood              - Refill all blood segments
+dw_speed <0.1-5.0>          - Set movement speed multiplier
+dw_jump <0.1-5.0>           - Set jump height multiplier
+dw_fly / dw_ghost / dw_walk - Change movement mode
+dw_teleport                 - Teleport to aim crosshair
+dw_slomo <0.1-4.0>          - Set game time dilation
+dw_fov <0.1-3.0>            - Set field of view multiplier
+dw_damage <1.0-20.0>        - Set damage multiplier
+dw_kill                     - Kill all aggressive enemies
+dw_level <1-99>             - Set player level
+dw_levelcap <1-99>          - Set player level cap
+dw_xp <1-5>                 - Grant quest XP tier
+dw_traits <amount>          - Add or remove trait points
+dw_unlocktraits             - Unlock all traits in skill tree
+dw_resettraits              - Reset / respec all traits
+dw_mutation <amount>        - Add or remove vampire mutation charges
+dw_cooldowns [0|1]          - Toggle ability cooldowns
+dw_time <HH:MM>             - Set time of day (e.g. dw_time 20:30)
+dw_fasttravel               - Unlock all fast travel destinations
+dw_mappins                  - Reveal all map pins / POIs
+dw_coins <amount>           - Add or remove coins
+dw_weight <0.1-100.0>       - Set carry weight multiplier
+dw_recipes                  - Unlock all crafting recipes
+dw_selfcheck                - Run reflection diagnostic check
+dw_give <gearId> [qty]      - Grant gear item or set (e.g. dw_give weapon_swordvampiric1a 1)
+dw_remove <gearId>          - Remove granted gear duplicates
+dw_preset <save|apply> <name> - Save or apply setting presets
+```
 
-Earlier versions wrote directly into the game's gameplay-attribute structs to try to force stat changes. That bypassed every engine-side validity check and was the one pattern in this project with a genuine crash history, so it has been removed entirely. Every remaining feature calls a function the game itself exposes.
+---
 
-### Renderer bridge contract
-The Electron renderer does not access the filesystem or game binaries directly. Instead, it receives a narrow, frozen `window.dawnwalker` API through the preload bridge and every call is forwarded to the main process via IPC.
-
-This keeps the UI sandboxed while preserving the real security boundary: all gameplay writes still flow through the validated main-process bridge and the UE4SS runtime contract. The renderer is meant to display state and issue safe requests, not to manipulate the live game state directly.
-
-## Project layout
+## Project Structure
 
 ```text
 .
-├── index.js                    # Electron main process and bridge logic
-├── preload.js                  # Renderer bridge exposure
-├── bridge-protocol.js           # Shared validation and sanitization for command inputs
-├── package.json                # Root Electron app config and build scripts
 ├── runtime-mods/
-│   └── DawnwalkerModBridge/
-│       └── Scripts/
-│           └── main.lua       # Live Lua bridge that reads commands and writes status
-├── native-mods/
-│   ├── DawnwalkerNativeFix/   # C++ UE4SS mod: item granting via raw FItemHandle copies
-│   └── dist/                  # Prebuilt DLL the app deploys, so users need no toolchain
-├── test/                       # Node-based tests for validation and safety logic
-├── tools/                      # Catalog generators, item-name merging, dump inspection
-├── ui/                         # React + Vite desktop interface
-│   ├── src/
-│   ├── package.json
-│   └── vite.config.js
-└── build/                      # Packaging / app resources
+│   ├── DawnwalkerMod/                  # Main In-Engine UE4SS Mod
+│   │   ├── enabled.txt
+│   │   └── Scripts/
+│   │       ├── main.lua                # Main entry point & loops
+│   │       ├── safety.lua              # Settle-window guards & crash prevention
+│   │       ├── state.lua               # In-memory mod state & telemetry
+│   │       ├── config.lua              # Presets manager
+│   │       ├── features/
+│   │       │   ├── combat.lua          # Health, stamina, damage amp, kill hostiles
+│   │       │   ├── character.lua       # Level, level cap, XP
+│   │       │   ├── movement.lua        # Speed, jump, fly/ghost, teleport, FOV
+│   │       │   ├── skills.lua          # Traits, mutation, cooldowns
+│   │       │   ├── world.lua           # Time, fast travel, map pins
+│   │       │   └── inventory.lua       # Coins, carry weight, crafting, diagnostics
+│   │       ├── gear/
+│   │       │   ├── catalog.lua         # Complete item & gear catalog
+│   │       │   └── granter.lua         # Gear granting dispatcher
+│   │       └── ui/
+│   │           ├── hud_menu.lua        # In-game interactive Canvas/HUD overlay
+│   │           ├── keybinds.lua        # Hotkey listener
+│   │           └── console.lua         # In-game console commands
+│   ├── DawnwalkerNativeFix/            # Native C++ Mod (raw FItemHandle memcpy)
+│   │   ├── enabled.txt
+│   │   └── dlls/
+│   │       └── main.dll                # Precompiled UE4SS C++ plugin
+│   └── mods.txt                        # UE4SS mod activation list
+├── native-mods/                        # C++ source code for DawnwalkerNativeFix
+│   ├── CMakeLists.txt
+│   ├── README.md
+│   ├── dist/
+│   │   └── DawnwalkerNativeFix.dll
+│   └── DawnwalkerNativeFix/
+│       ├── CMakeLists.txt
+│       └── dllmain.cpp
+├── tools/                              # Asset extraction and inspection tools
+│   ├── dumpsig.ps1
+│   ├── dumpmods.ps1
+│   ├── gengear.js
+│   ├── gencraftables.js
+│   └── gear-index.json
+├── docs/                               # Developer reference documentation
+└── todo.md                             # Comprehensive reconstruction plan & checklist
 ```
 
-## Surviving game updates
+---
 
-Both mods bind to the game by name — there are no hardcoded memory offsets anywhere — so ordinary patches generally keep working, and anything that does break fails soft rather than crashing.
+## Safety & Crash Prevention
 
-The risk is that a failed lookup looks identical to a control that simply does nothing. Two features exist to make that visible:
-
-**Check Game Compatibility** (Gear page) resolves every class, function and object the app depends on in a single pass and reports exactly what is missing, writing each miss to `UE4SS.log`. Run it after a game update. It also reports item counts per category, which is the early warning that a content patch has invalidated the item catalogs.
-
-**Item catalogs** are generated from the game's own asset list rather than hand-written. After a content patch, regenerate them with `tools/gengear.js` and `tools/gencraftables.js` from a fresh object dump.
-
-Engine version changes are the one dependency outside this project's control, since the native mod is built against a pinned UE4SS revision.
-
-## Item names
-
-Item display names live in a localisation string table packed inside the game's `.pak`, and the game populates it lazily — only items it has actually drawn on screen resolve. The bridge captures them automatically whenever an in-game menu is open, logging only names it has not already seen. `tools/parseitemnames.js` extracts them from `UE4SS.log` and `tools/applyitemnames.js` merges them into the catalog labels. Names accumulate across sessions, so repeated play fills the catalog in.
-
-## Requirements
-
-- Windows
-- The Blood of Dawnwalker installed
-- UE4SS-style runtime bridge support available in the game mod environment
-- Node.js and npm
-
-## Getting started
-
-Install the dependencies:
-
-```bash
-npm install
-npm --prefix ui install
-```
-
-Then run the app in development mode:
-
-```bash
-npm start
-```
-
-This builds the UI and launches the Electron desktop app.
-
-## Development scripts
-
-From the project root:
-
-```bash
-npm start
-npm run build:ui
-npm run dist
-npm test
-```
-
-From the UI folder:
-
-```bash
-npm --prefix ui run dev
-npm --prefix ui run build
-npm --prefix ui run lint
-npm --prefix ui run test
-```
-
-## Usage
-
-1. Launch the game and make sure the bridge mod is deployed and active.
-2. Start the app.
-3. Use the in-app pages to change supported settings or trigger runtime actions.
-4. The app validates the change, sends it through the bridge, and reports the current status back to the UI.
-5. If you want to return to normal gameplay, use the reset control or close the app to trigger default-safe cleanup.
-
-## Important notes
-
-- This project is focused on supported runtime behavior and does not attempt to invent unsupported game features.
-- Some gameplay changes are save-affecting or risky and should be used carefully.
-- This is a modding and runtime utility project intended for advanced users who understand the risk profile of live game changes.
-
-## License
-
-This project currently uses the ISC license in the root package configuration.
-
-## Disclaimer
-
-This project modifies live game runtime state. Use it responsibly and at your own risk. Supported features are deliberately limited to preserve stability and avoid leaving the game in a stale or unsafe state.
+This mod incorporates extensive crash prevention rules:
+1. **Pawn Respawn Settle Window**: Automatically delays component writes for 3–6 seconds upon respawning to prevent fatal access violations (`0xC0000005`).
+2. **Cutscene Gating**: Pauses all gameplay modifications and damage amplification while cinematic cutscenes or dialogues are active.
+3. **No Attribute Table Overflow**: Clamps player level and level cap to 99 to avoid unmapped memory reads in the engine's progression curve tables.
+4. **Anti-Compounding Multipliers**: Multipliers always calculate from cached base properties, preventing compounding scaling on repeated applies.
