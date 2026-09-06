@@ -1,82 +1,84 @@
-# Developer onboarding guide
+# Developer Onboarding Guide
 
-This project is a runtime-sensitive desktop app for Dawnwalker that communicates with a live UE4SS bridge. It is not a generic settings-only UI and it should not behave like one.
+Welcome to the **DawnwalkerMod** codebase. This project is an in-engine, pure UE4SS mod for *The Blood of the Dawnwalker*. It runs inside the game process without any external applications, executables, or background processes.
 
-## Core architecture
+---
 
-The app is split into a few layers:
+## 1. Quick Setup & Installation
 
-- Electron main process: manages the desktop app and bridge command file writes.
-- React UI: reads live status and sends state changes to the bridge.
-- Lua bridge: reads command.txt, applies safe runtime changes, and writes status.txt.
-- Runtime validation layer: central sanitization for bridge fields and actions.
+### Requirements:
+- Windows 10/11
+- *The Blood of the Dawnwalker* installed
+- [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) (v3.0.1 or higher) installed in your game directory (`Dawnwalker/Binaries/Win64/`)
 
-## Important design constraints
+### Deploying the Mod for Testing:
+1. Locate your game's UE4SS `Mods` directory:
+   `The Blood of Dawnwalker\Dawnwalker\Binaries\Win64\Mods\`
+2. Copy the folders from `runtime-mods/` into `Mods/`:
+   - `Mods/DawnwalkerMod/`
+   - `Mods/DawnwalkerNativeFix/`
+3. Make sure both mods are enabled in `Mods/mods.txt`:
+   ```text
+   DawnwalkerMod : 1
+   DawnwalkerNativeFix : 1
+   ```
+4. Launch the game.
 
-### 1. Defaults-first behavior
+---
 
-The app intentionally does not restore stale UI state on launch. Every game launch starts at the game defaults. The UI can apply a preset only after the game is loaded and the bridge has acknowledged the current boot.
+## 2. Architecture Overview
 
-### 2. Boot-ID handshake
-
-The bridge only trusts commands that match the current boot. Out-of-date command files are ignored.
-
-### 3. Heartbeat + close reset
-
-The app writes a heartbeat while it is alive. If the heartbeat stops, or if the app is closing and writes `appClosed=1`, the Lua bridge releases any runtime override and restores default behavior.
-
-### 4. Cutscene safety
-
-Bridge writes are paused during cutscenes or other unsafe transitions. This prevents the app from writing while the game is unstable.
-
-### 5. Validation happens before writes
-
-The app must validate every field before writing to the bridge. Unknown keys, invalid numeric ranges, and unsupported actions must be rejected.
-
-## Where to look first
-
-- `index.js`: Electron bridge orchestration and command/status handling
-- `bridge-protocol.js`: shared field and action validators
-- `runtime-mods/DawnwalkerModBridge/Scripts/main.lua`: runtime Lua behavior and safety enforcement
-- `ui/src/bridge/useBridge.js`: React-side bridge integration with polling and state hydration
-- `ui/src/bridge/BridgePanel.jsx`: bridge status and reset UI
-
-## How to work safely
-
-1. Treat `status.txt` as the authoritative runtime status.
-2. Treat `command.txt` as the current requested state.
-3. Never rely on browser local state to drive live game behavior.
-4. Keep all new fields/commands aligned with the bridge validator.
-5. Use boot-aware writes and heartbeat-safe resets.
-6. Avoid unsupported or speculative game mutations.
-
-## What not to do
-
-- Do not reintroduce localStorage-based gameplay persistence as the primary runtime source.
-- Do not send arbitrary nested JSON payloads to the bridge.
-- Do not bypass the validator.
-- Do not write runtime commands during cutscenes or unknown world states.
-- Do not assume the game is always safe to modify.
-
-## Verification checklist
-
-Before considering a change safe:
-
-- status file still reports correct values
-- command file still uses the required flat key/value format
-- heartbeat and boot handshake still work
-- app close still resets the bridge state
-- no stale writes survive a reboot
-- lint/build/tests still pass
-
-## Useful commands
-
-```bash
-npm --prefix ui run lint
-npm --prefix ui run build
-node --test
+```text
+Game Launch (Dawnwalker.exe)
+  └── UE4SS loads Mods/mods.txt
+        ├── Loads DawnwalkerNativeFix/dlls/main.dll (C++ Plugin)
+        └── Executes DawnwalkerMod/Scripts/main.lua
+              ├── safety.lua    (Settle windows, cutscene guards, pointer checks)
+              ├── state.lua     (In-memory toggles, multipliers, base values)
+              ├── config.lua    (Presets manager: Mods/DawnwalkerMod/presets.txt)
+              ├── features/     (Combat, Character, Movement, Skills, World, Inventory)
+              ├── gear/         (Item catalog & native fix granter)
+              └── ui/           (Canvas HUD menu on F1, keybinds, console commands)
 ```
 
-## Safety principle
+### Key Modules:
+- **`main.lua`**: Entry point. Hooks `AHUD:ReceiveDrawHUD` for menu rendering and starts two asynchronous loops:
+  - **1000ms Main Tick Loop**: Refreshes player pawn, checks settle windows and cutscene status, and ticks all feature modules.
+  - **100ms Fast Loop**: Reactive damage amplifier that tracks hostile NPC health deltas and re-applies scaled damage.
+- **`safety.lua`**: Protects against game engine crashes. Settle-window tracking delays writes after player pawn respawn.
+- **`state.lua`**: Single source of truth for in-memory toggles, multipliers, base values, and live readouts. Zero disk polling.
+- **`ui/hud_menu.lua`**: Draws the interactive mod menu directly onto the Unreal Engine canvas.
+- **`ui/keybinds.lua`**: Registers hotkeys (`F1`, `NumPad 1`–`9`) via UE4SS `RegisterKeyBind`.
+- **`ui/console.lua`**: Registers in-game console commands (`dw_*`) via `RegisterConsoleCommandHandler`.
 
-This app is a runtime control layer for a live game, not a generic mod menu. The highest priority is always safe default behavior and stale-state prevention.
+---
+
+## 3. Development Workflow & Debugging
+
+### Live Diagnostics via `UE4SS.log`:
+- All mod output is written to `Dawnwalker/Binaries/Win64/UE4SS.log`.
+- To watch live output during development:
+  ```powershell
+  Get-Content -Path "..\Dawnwalker\Binaries\Win64\UE4SS.log" -Wait -Tail 30
+  ```
+
+### In-Game Testing:
+- Open the Unreal Engine console with the **`~`** (tilde) key.
+- Test commands directly:
+  ```text
+  dw_god 1          - Enables God Mode
+  dw_heal           - Restores health and stamina
+  dw_speed 2.0      - Sets movement speed to 2x
+  dw_give weapon_swordvampiric1a 1 - Grants The Vrakhir sword
+  dw_selfcheck      - Runs reflection verification across all game classes
+  ```
+- Toggle the in-game GUI with **`F1`**.
+
+---
+
+## 4. How to Work Safely
+
+1. **Always wrap reflection calls in `pcall`**: If a game patch renames a Blueprint function or property, `pcall` prevents the mod from crashing.
+2. **Never set player level or level cap above 99**: The game's XP curve tables end at level 99; higher values read invalid memory.
+3. **Respect settle windows**: Never write to newly spawned player pawn components without verifying `Safety.CombatSettleTicksRemaining == 0`.
+4. **Always cache base values**: Multipliers must scale from `BaseValues`, never compounding on top of already modified properties.

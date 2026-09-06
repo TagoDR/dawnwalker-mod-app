@@ -1,100 +1,64 @@
-# Lua-side bridge spec
+# UE4SS In-Engine Mod Specification
 
-This document defines the runtime behavior of the UE4SS Lua bridge that reads `command.txt` and writes `status.txt`.
+This document defines the runtime architecture and execution model of **DawnwalkerMod** within UE4SS.
 
-## Files involved
+---
 
-- `Mods/DawnwalkerModBridge/command.txt`
-- `Mods/DawnwalkerModBridge/status.txt`
+## 1. Runtime Lifecycle
 
-## Responsibilities
+When the game boots with UE4SS:
+1. UE4SS parses `Mods/mods.txt`.
+2. UE4SS loads `DawnwalkerNativeFix/dlls/main.dll` (if enabled) and calls `start_mod()`.
+3. UE4SS initializes the Lua state and executes `DawnwalkerMod/Scripts/main.lua`.
+4. `main.lua` hooks the HUD drawing event via `RegisterHook("/Script/Engine.HUD:ReceiveDrawHUD", ...)`.
+5. Keybinds and console commands are registered.
+6. Two asynchronous loops are started via `LoopAsync`:
+   - **Main Loop** (1000ms interval)
+   - **Damage Amplifier Loop** (100ms interval)
 
-The Lua bridge is responsible for:
+---
 
-- reading the current command file
-- validating that the app is still live
-- checking the current boot ID
-- gating writes during unsafe states
-- applying valid persistent settings
-- executing one-shot actions once per request
-- writing the current status back to the status file
-- resetting all settings to defaults when the app is gone or closes
+## 2. In-Memory State Model
 
-## Boot handshake model
+Unlike legacy versions that communicated via disk files (`command.txt` / `status.txt`), state is held entirely in memory in `state.lua`:
 
-Each game boot creates a unique boot ID. The Lua bridge will not apply any request until the command file contains the same boot ID value.
+* `State.Toggles`: Boolean flags (`infiniteHealth`, `infiniteStamina`, `infiniteBlood`, `noCooldowns`, `keepActionSlotsCharged`).
+* `State.Multipliers`: Numeric multipliers (`speedMultiplier`, `jumpMultiplier`, `fovMultiplier`, `gameSpeed`, `damageAmplifier`, `carryWeightMultiplier`).
+* `State.Gameplay`: Game adjustments (`levelCap`, `actionDifficulty`, `rpgDifficulty`, `movementMode`).
+* `State.BaseValues`: Cached vanilla values to prevent compounding on repeated ticks.
+* `State.Readouts`: Live telemetry polled each second (level, XP, trait points, day, time, hostile NPC count).
 
-This prevents stale commands from earlier runs being replayed after a restart.
+---
 
-## App liveness model
+## 3. Asynchronous Execution Loops
 
-The app periodically writes a `heartbeat` value. The Lua bridge tracks.
+### Main Tick Loop (1000ms):
+* **Pawn Tracking**: Calls `Safety.RefreshPawnSettleState()`. Detects pawn destruction/reconstruction across deaths and level loads.
+* **Cutscene Stand-Down**: Calls `Safety.IsCutsceneActive(player)`. Pauses all writes during cutscenes or dialogues.
+* **Feature Module Ticking**:
+  - `Combat.Tick(player, combatSettling)`
+  - `Character.Tick()`
+  - `Movement.Tick(player, movementSettling)`
+  - `Skills.Tick(player)`
+  - `World.Tick()`
+  - `Inventory.Tick(player)`
+* **Passive Item Name Capture**: When an in-game inventory/menu is open (`Safety.IsMenuOpen()`), scans loaded item data assets and logs newly resolved localized names to `UE4SS.log`.
 
-- the last observed heartbeat
-- time since the last heartbeat
-- whether the app has closed (`appClosed=1`)
+### Damage Amplifier Loop (100ms):
+* Runs on a tight 100ms timer to ensure bonus damage lands responsively after the player's attack.
+* Queries `CombatSubsystem:GetAllAggressiveNPCActors()`.
+* Tracks health percentages in `State.Internal.AmpHealth`.
+* When an enemy's health decreases, calculates the delta and re-applies `delta * (multiplier - 1)` using `CombatComponentBase:SetHealthPercent()` or `Kill()`.
+* Automatically settles and baselines when the player pawn address changes.
 
-If the app stops sending heartbeats for a timeout window, the Lua bridge releases the runtime settings and returns to defaults.
+---
 
-## Safety checks
+## 4. Crash Prevention Architecture
 
-The Lua bridge must guard writes behind:
-
-- valid player/world presence
-- cutscene-safe logic
-- valid boot handshake
-- runtime action nonce handling
-- safe object validity checks
-
-This includes checks for:
-
-- player existence
-- combat component ownership
-- world state and cutscene mode
-- unsafe actor state transitions
-- spawn or respawn settle windows
-
-## Persistent settings flow
-
-Persistent settings are keys written into `command.txt` and re-applied every tick until removed.
-
-The bridge should:
-
-1. read the command file
-2. verify boot success
-3. refresh app connection state
-4. skip writes when unsafe
-5. apply valid settings only
-6. write status back to `status.txt`
-
-## One-shot action flow
-
-One-shot actions must be implemented using a nonce-like request ID to avoid stale or replayed actions.
-
-Process:
-
-1. app writes `actionId`, `action`, and optional `actionArg`
-2. Lua reads and tracks the last action request
-3. if the request matches the current nonce, it executes once
-4. result is written to `status.txt`
-5. failure or timeout is reported back in a safe way
-
-## Status output contract
-
-The Lua bridge writes status keys representing actual runtime results, including:
-
-- `ok`
-- `bootId`
-- `cutsceneActive`
-- `healthLocked`
-- `staminaLocked`
-- `bloodLocked`
-- `actionResult`
-
-If a runtime setting cannot be applied, the bridge must not silently ignore it forever. It should report the result and keep the command file in sync with the actual runtime state.
-
-## Reset behavior
-
-When the app has closed or is no longer connected, the Lua bridge releases its runtime overrides and brings the game back to its defaults.
-
-This is required to prevent stale infinite stamina and other lingering runtime effects after exit.
+The mod isolates gameplay writes behind strict validation:
+1. **`SafeIsValid(UObject)`**: Protects against stale pointers.
+2. **`SameObject(a, b)`**: Compares raw object memory addresses (`GetAddress()`) rather than Lua userdata handles.
+3. **Pawn Settle Counters**:
+   - `CombatSettleTicksRemaining` (3 ticks): Gating for `CombatComponentBase` and `RebelAISubsystem:AddPlayerInvulnerability`.
+   - `MovementSettleTicksRemaining` (6 ticks): Gating for `CharacterMovementComponent`.
+4. **Cutscene Safety**: Gated by `CinematicSubsystem:IsDialogueActive()`, `IsCharacterInCinematicDialogueOrCutscene()`, and `FocusAbilitiesSubsystem:GetIsInFocusAbilityCinematicMode()`.

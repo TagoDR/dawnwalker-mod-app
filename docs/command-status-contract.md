@@ -1,135 +1,89 @@
-# Command/status contract sheet
+# Engine Features & Reflection Reference Sheet
 
-## File locations
+This document catalogs every supported feature, Unreal Engine reflection target, class path, and function signature utilized by **DawnwalkerMod**.
 
-- `Mods/DawnwalkerModBridge/command.txt`
-- `Mods/DawnwalkerModBridge/status.txt`
+---
 
-## Command file
+## 1. Combat & Survivability
 
-The command file is the app's request payload.
+| Feature | Engine Class & Method / Property | Arguments & Types | Notes |
+| :--- | :--- | :--- | :--- |
+| **Player Invulnerability** | `/Script/DogwoodCombat.RebelAISubsystem:AddPlayerInvulnerability`<br>`RemovePlayerInvulnerability` | `(APlayerCharacter* Player)` | Primary damage immunity call. Must wait for post-respawn settle window. |
+| **GAS Invulnerability** | `/Script/GameplayAbilities.AbilitySystemComponent:BP_ApplyGameplayEffectToSelf` | `(TSubclassOf<UGameplayEffect> EffectClass, float Level, FGameplayEffectContextHandle Context)` | Applies `/Game/_Dawnwalker/Abilities/Player/GE_Invulnerability.GE_Invulnerability_C`. |
+| **Engine God Mode** | `/Script/Engine.CheatManager:God` | None | Engine cheat manager god mode toggle. |
+| **Health Lock** | `/Script/DogwoodCombat.CombatComponentBase:LockHealth`<br>`UnlockHealth` | None | Owned by player pawn. |
+| **Set Health** | `/Script/DogwoodCombat.CombatComponentBase:SetHealthPercent` | `(float InPercent)` | `1.0` = 100%. |
+| **Stamina Lock** | `/Script/DogwoodCombat.CombatComponentBase:LockStamina`<br>`UnlockStamina` | None | Owned by player pawn. |
+| **Set Stamina** | `/Script/DogwoodCombat.CombatComponentBase:SetStaminaPercent` | `(float InPercent)` | `1.0` = 100%. |
+| **Blood Lock** | `/Script/DogwoodStats.BloodBarComponent:LockBlood`<br>`UnlockBlood` | None | Lives on `PlayerState`. |
+| **Set Blood** | `/Script/DogwoodStats.BloodBarComponent:SetBloodPercent` | `(float InBloodPercent)` | `1.0` = 100%. |
+| **Replenish Blood** | `/Script/DogwoodStats.BloodBarComponent:HealAndReplenishAllSegments` | None | Restores all vampire blood segments. |
+| **Hostile NPCs List** | `/Script/DogwoodCombat.CombatSubsystem:GetAllAggressiveNPCActors` | Returns `TArray<AActor*>` | Returns list of hostile enemies. |
+| **Enemy Kill** | `/Script/DogwoodCombat.CombatComponentBase:Kill` | None | Eliminates target actor. |
+| **Action Difficulty** | `/Script/DogwoodCombat.CombatSubsystem:SetActionDifficulty` | `(int32 Difficulty)` | `0` = Story, `1` = Normal, `2` = Immersive, `3` = Hard. |
+| **RPG Difficulty** | `/Script/DogwoodCombat.CombatSubsystem:SetRPGDifficulty` | `(int32 Difficulty)` | `0` = Story, `1` = Normal, `2` = Immersive, `3` = Hard. |
 
-### Core keys
+---
 
-| Key | Type | Meaning | Notes |
-| --- | --- | --- | --- |
-| `bootId` | string | current app/game boot identifier | must match the current boot |
-| `heartbeat` | number | app liveness timestamp | refreshed periodically |
-| `appClosed` | `0`/`1` | app shutdown marker | `1` triggers immediate release to defaults |
+## 2. Character Progression
 
-### Persistent settings keys
+| Feature | Engine Class & Method / Property | Arguments & Types | Notes |
+| :--- | :--- | :--- | :--- |
+| **Force Level** | `/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:ForceLevelUpTo` | `(int32 Level, bool bReceiveTraitPoints)` | Clamped to `[1, 99]`. Levels >99 crash the game. |
+| **Level Cap** | `/Script/DogwoodCharacterDevelopment.DogwoodCharacterDevelopmentSettings:LevelCap` | `int8` Property | Clamped to `[1, 99]`. |
+| **Quest XP Grant** | `/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:AddQuestXP` | `(int32 RewardAmountEnum)` | `1` = Very Small, `2` = Small, `3` = Medium, `4` = Large, `5` = Very Large. |
+| **Get Level** | `CharacterDevelopmentSubsystem:GetCurrentLevel` | Returns `int32` | Current player level. |
+| **Get Current XP** | `CharacterDevelopmentSubsystem:GetCurrentXP` | Returns `int32` | Accumulated XP in current level. |
+| **Get XP Requirement**| `CharacterDevelopmentSubsystem:GetCurrentLevelXPRequirement` | `(int32 Level)` -> Returns `int32` | XP needed to advance. |
 
-These are runtime setting entries the Lua bridge re-applies every tick while still present.
+---
 
-| Key | Type | Meaning |
-| --- | --- | --- |
-| `levelCap` | number | runtime level cap |
-| `infiniteHealth` | `0`/`1` | health lock or infinite health |
-| `infiniteStamina` | `0`/`1` | stamina lock |
-| `infiniteBlood` | `0`/`1` | blood lock |
-| `keepActionSlotsCharged` | `0`/`1` | keep action slots charged |
-| `noCooldowns` | `0`/`1` | disable cooldowns |
-| `speedMultiplier` | float | movement speed scaling |
-| `jumpMultiplier` | float | jump power scaling |
-| `fovMultiplier` | float | field-of-view multiplier |
-| `gameSpeed` | float | overall game time scaling |
-| `damageAmplifier` | float | re-applies each hostile enemy's health drop, scaled (1 = off) |
-| `carryWeightMultiplier` | float | carry weight scaling |
-| `actionDifficulty` | int | action difficulty level |
-| `rpgDifficulty` | int | RPG difficulty level |
-| `movementMode` | string | `walk`, `fly`, or `ghost` |
+## 3. Movement, Camera & Time Scale
 
-### One-shot action keys
+| Feature | Engine Class & Method / Property | Arguments & Types | Notes |
+| :--- | :--- | :--- | :--- |
+| **Walk Speed** | `/Script/Engine.CharacterMovementComponent:MaxWalkSpeed` | `float` Property | Scaled from cached `BaseValues.walkSpeed`. Multiplier `[0.1, 5.0]`. |
+| **Jump Height** | `/Script/Engine.CharacterMovementComponent:JumpZVelocity` | `float` Property | Scaled from cached `BaseValues.jumpZ`. Multiplier `[0.1, 5.0]`. |
+| **Fly Mode** | `/Script/Engine.CheatManager:Fly` | None | Engine cheat flight mode. |
+| **Ghost Mode** | `/Script/Engine.CheatManager:Ghost` | None | Engine cheat noclip flight mode. |
+| **Walk Mode** | `/Script/Engine.CheatManager:Walk` | None | Restores normal ground walking. |
+| **Teleport** | `/Script/Engine.CheatManager:Teleport` | None | Teleports pawn to raycast aim point. |
+| **Field of View** | `/Script/Engine.PlayerCameraManager:DefaultFOV` | `float` Property | Clamped between `10.0` and `170.0` degrees. |
+| **Game Speed** | `/Script/Engine.CheatManager:Slomo` | `(float NewTimeDilation)` | Range `[0.1, 4.0]`. `1.0` is normal speed. |
 
-| Key | Type | Meaning |
-| --- | --- | --- |
-| `actionId` | string | unique request id |
-| `action` | string | action name |
-| `actionArg` | string | optional action argument |
+---
 
-Examples:
+## 4. Skills & Abilities
 
-- `action=healNow`
-- `action=addCoins`, `actionArg=2500`
-- `action=setTimeOfDay`, `actionArg=20:30`
+| Feature | Engine Class & Method / Property | Arguments & Types | Notes |
+| :--- | :--- | :--- | :--- |
+| **Receive Points** | `/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:ReceiveTraitPoints` | `(int32 Value)` | Delta `[-999, 999]`. Negative removes unspent points. |
+| **Set Points** | `/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:SetTraitPointsAmount` | `(int32 Value)` | Total unspent points `[0, 999]`. |
+| **Unlock All Traits** | `/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:UnlockAllTraits` | `(bool bUnlock, bool bUnblock, bool bUnhide, bool bUnblockNextLevelOnly)` | Called with `(true, true, true, false)`. |
+| **Reset Traits** | `/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:ResetAllTraits` | None | Full trait tree respec. |
+| **Mutation Charges** | `/Script/DogwoodCharacterDevelopment.CharacterDevelopmentSubsystem:AddMutationCharges` | `(int32 ChargeValue)` | Delta `[-999, 999]`. Controls vampire corruption. |
+| **Toggle Cooldowns** | `/Script/DogwoodFocus.FocusAbilitiesSubsystem:ToggleDisablingAllCooldowns_Debug` | None | Eliminates ability cooldowns. |
+| **Check Cooldowns** | `/Script/DogwoodFocus.FocusAbilitiesSubsystem:AreCooldownsEnabled_Debug` | Returns `bool` | Queries cooldown state. |
+| **Action Slots Override**| `/Script/DogwoodCombat.CombatFocusComponent:SetSlotsChargedOverride` | `(int32 Slots)` | Automatically keeps activation charges full. |
 
-## Status file
+---
 
-The status file is the runtime output report from the Lua bridge.
+## 5. World & Time
 
-| Key | Type | Meaning |
-| --- | --- | --- |
-| `ok` | `0`/`1` | bridge is currently healthy |
-| `bootId` | string | active boot identifier |
-| `awaitingHandshake` | `0`/`1` | the game has not yet acknowledged the current app boot |
-| `appConnected` | `0`/`1` | the app heartbeat is still being seen by the runtime |
-| `cutsceneActive` | `0`/`1` | whether cutscene gating is active |
-| `healthLocked` | `0`/`1` | health lock status |
-| `staminaLocked` | `0`/`1` | stamina lock status |
-| `bloodLocked` | `0`/`1` | blood lock status |
-| `actionResult` | string | last action status/result |
+| Feature | Engine Class & Method / Property | Arguments & Types | Notes |
+| :--- | :--- | :--- | :--- |
+| **Set Time** | `/Script/DogwoodSystem.TimeSystemImpl:SetTime` | `(int32 Hour, int32 Minute, int32 Second, bool bAbsoluteTime)` | Sets in-game clock (`00:00` to `23:59`). |
+| **Unlock Fast Travel**| `/Script/DogwoodMap.MappinSystemBlueprintLibrary:DebugUnlockAllFastTravelDestinations` | `(UObject* OpenWorldJournal)` | Unlocks all fast travel destinations on map. |
+| **Reveal Map Pins** | `/Script/DogwoodMap.OpenWorldJournalInterface:RevealAllMappins` | `(UObject* Context)` | Called with `OpenWorldJournalImpl` as explicit context. |
+| **NPC Level Override**| `/Script/DogwoodSystem.Default__DWSystemBlueprintFunctionLibrary:SetNpcLevelOverride` | `(AActor* Player, int32 Level)` | Range `[0, 99]`. `0` resets to normal scaling. |
+| **Alert Level** | `/Script/DogwoodSystem.CourtSubsystem:SetAlertLevelByInt` | `(int32 AlertLevel)` | Range `[0, 9]`. |
 
-> `gameRunning` is tracked by the Electron app, not emitted by the Lua bridge status.txt. The app-side `gameRunning` value is derived from the live process scan and is used by the UI as a top-level game-state signal.
+---
 
-## Supported runtime surface
+## 6. Inventory & Economy
 
-The bridge contract is intentionally narrow. The app only writes the keys that are validated by the shared bridge protocol, and the game runtime only applies those values that are known to be safe and supported.
-
-### Supported persistent field keys
-
-- `levelCap`
-- `infiniteHealth`
-- `infiniteStamina`
-- `infiniteBlood`
-- `keepActionSlotsCharged`
-- `noCooldowns`
-- `speedMultiplier`
-- `jumpMultiplier`
-- `fovMultiplier`
-- `gameSpeed`
-- `damageAmplifier`
-- `carryWeightMultiplier`
-- `actionDifficulty`
-- `rpgDifficulty`
-- `movementMode`
-
-### Supported one-shot actions
-
-- `grantXP`
-- `addTraitPoints`
-- `setTraitPoints`
-- `unlockAllTraits`
-- `resetAllTraits`
-- `addMutationCharges`
-- `addCoins`
-- `unlockAllRecipes`
-- `unlockAllFastTravel`
-- `revealAllMappins`
-- `killAllAggressive`
-- `teleport`
-- `setTimeOfDay`
-- `refillBlood`
-- `healNow`
-
-Everything else is intentionally rejected before it reaches the runtime bridge.
-
-## Safety and compatibility rules
-
-- command.txt is flat key/value text, not JSON
-- status.txt is flat key/value text, not JSON
-- app writes are blocked if the boot ID is stale
-- app writes are blocked during cutscenes or unsafe world states
-- app close must write `appClosed=1` to release runtime settings
-- unsupported keys should be rejected before writing
-- action ids should be unique and never reused without a fresh request
-- the contract must stay conservative; unsupported game behavior is not added just to fill out the UI
-
-## Example lifecycle
-
-1. App starts and generates `bootId`.
-2. App writes heartbeat and other desired runtime settings.
-3. Lua bridge validates boot ID and world state.
-4. Lua applies supported changes and writes status.
-5. UI polls status and updates state.
-6. App closes and writes `appClosed=1`.
-7. Lua bridge releases settings and returns to defaults.
+| Feature | Engine Class & Method / Property | Arguments & Types | Notes |
+| :--- | :--- | :--- | :--- |
+| **Add Currency** | `/Script/DogwoodInventory.InventoryComponent:AddCurrency` | `(int32 CurrencyType, int32 Quantity)` | Type `0` = Coins. Range `[-999999, 999999]`. |
+| **Carry Weight Limit**| `/Script/DogwoodInventory.InventoryComponent:WeightLimit` | `float` Property | Scaled from base weight limit. Multiplier `[0.1, 100.0]`. |
+| **Unlock Recipes** | `/Script/DogwoodInventory.CraftingSubsystem:UnlockAllCraftingRecipes` | None | Unlocks all crafting schematics. |

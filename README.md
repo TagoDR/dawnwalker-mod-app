@@ -142,33 +142,36 @@ dw_preset <save|apply> <name> - Save or apply setting presets
 
 ```text
 .
+├── agents.md                           # Guidelines & safety constraints for AI agents / devs
+├── README.md                           # Mod overview, installation & user guide
+├── todo.md                             # Reconstruction plan, security audit & checklist
 ├── runtime-mods/
 │   ├── DawnwalkerMod/                  # Main In-Engine UE4SS Mod
 │   │   ├── enabled.txt
 │   │   └── Scripts/
-│   │       ├── main.lua                # Main entry point & loops
+│   │       ├── main.lua                # Main entry point & async loops
 │   │       ├── safety.lua              # Settle-window guards & crash prevention
-│   │       ├── state.lua               # In-memory mod state & telemetry
-│   │       ├── config.lua              # Presets manager
+│   │       ├── state.lua               # In-memory mod state & live telemetry
+│   │       ├── config.lua              # Presets manager (presets.txt)
 │   │       ├── features/
-│   │       │   ├── combat.lua          # Health, stamina, damage amp, kill hostiles
-│   │       │   ├── character.lua       # Level, level cap, XP
-│   │       │   ├── movement.lua        # Speed, jump, fly/ghost, teleport, FOV
-│   │       │   ├── skills.lua          # Traits, mutation, cooldowns
-│   │       │   ├── world.lua           # Time, fast travel, map pins
+│   │       │   ├── combat.lua          # Health, stamina, blood, damage amp, kill hostiles
+│   │       │   ├── character.lua       # Level, level cap, quest XP tiers
+│   │       │   ├── movement.lua        # Speed, jump, fly/ghost, teleport, FOV, slomo
+│   │       │   ├── skills.lua          # Traits, mutation, cooldowns, action slots
+│   │       │   ├── world.lua           # Time of day, fast travel, map pins, alert level
 │   │       │   └── inventory.lua       # Coins, carry weight, crafting, diagnostics
 │   │       ├── gear/
-│   │       │   ├── catalog.lua         # Complete item & gear catalog
-│   │       │   └── granter.lua         # Gear granting dispatcher
+│   │       │   ├── catalog.lua         # Complete 800+ item & gear catalog
+│   │       │   └── granter.lua         # Gear granting dispatcher (DawnwalkerNativeFix)
 │   │       └── ui/
-│   │           ├── hud_menu.lua        # In-game interactive Canvas/HUD overlay
-│   │           ├── keybinds.lua        # Hotkey listener
-│   │           └── console.lua         # In-game console commands
+│   │           ├── hud_menu.lua        # In-game interactive Canvas/HUD overlay (F1)
+│   │           ├── keybinds.lua        # Hotkey listener (F1, NumPad 1-9)
+│   │           └── console.lua         # In-game console commands (dw_*)
 │   ├── DawnwalkerNativeFix/            # Native C++ Mod (raw FItemHandle memcpy)
 │   │   ├── enabled.txt
 │   │   └── dlls/
 │   │       └── main.dll                # Precompiled UE4SS C++ plugin
-│   └── mods.txt                        # UE4SS mod activation list
+│   └── mods.txt                        # Master UE4SS mod activation list
 ├── native-mods/                        # C++ source code for DawnwalkerNativeFix
 │   ├── CMakeLists.txt
 │   ├── README.md
@@ -183,15 +186,35 @@ dw_preset <save|apply> <name> - Save or apply setting presets
 │   ├── gengear.js
 │   ├── gencraftables.js
 │   └── gear-index.json
-├── docs/                               # Developer reference documentation
-└── todo.md                             # Comprehensive reconstruction plan & checklist
+└── docs/                               # Developer reference documentation
+    ├── developer-onboarding.md         # Quick start & development workflow
+    ├── lua-side-spec.md                # Runtime lifecycle, loops & state model
+    ├── command-status-contract.md      # Unreal Engine reflection reference sheet
+    ├── protocol-reference.md           # Presets format, console API & native IPC
+    ├── renderer-api-contract.md        # Canvas HUD menu layout & input handling
+    └── react-side-spec.md              # In-game menu 7-tab feature matrix & state
 ```
+
+---
+
+## Documentation & Developer Guidelines
+
+Comprehensive reference documentation is provided in the repository:
+
+- [**`agents.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/agents.md) — Crucial safety rules, crash prevention guidelines, and pattern for adding new features.
+- [**`docs/developer-onboarding.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/docs/developer-onboarding.md) — Local testing, setup, and live debugging with `UE4SS.log`.
+- [**`docs/lua-side-spec.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/docs/lua-side-spec.md) — UE4SS runtime lifecycle, asynchronous loops, and in-memory state model.
+- [**`docs/command-status-contract.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/docs/command-status-contract.md) — Reflection cheat sheet covering all game subsystems, functions, arguments, and safe ranges.
+- [**`docs/protocol-reference.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/docs/protocol-reference.md) — Presets file format (`presets.txt`), console command signatures, and native C++ plugin IPC.
+- [**`docs/renderer-api-contract.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/docs/renderer-api-contract.md) — Canvas HUD menu overlay architecture, color palettes, and input state machine.
+- [**`docs/react-side-spec.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/docs/react-side-spec.md) — Menu 7-tab feature matrix, direct-to-state synchronization, and telemetry footer.
+- [**`todo.md`**](file:///C:/Users/Admin/WebstormProjects/dawnwalker-mod-app-master/todo.md) — Complete reconstruction plan, security audit findings, and verified completion checklist.
 
 ---
 
 ## Safety & Crash Prevention
 
-This mod incorporates extensive crash prevention rules:
+This mod incorporates extensive crash prevention rules derived from engine crash-dump analysis:
 1. **Pawn Respawn Settle Window**: Automatically delays component writes for 3–6 seconds upon respawning to prevent fatal access violations (`0xC0000005`).
 2. **Cutscene Gating**: Pauses all gameplay modifications and damage amplification while cinematic cutscenes or dialogues are active.
 3. **No Attribute Table Overflow**: Clamps player level and level cap to 99 to avoid unmapped memory reads in the engine's progression curve tables.
